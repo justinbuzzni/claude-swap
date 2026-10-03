@@ -25,7 +25,7 @@ from claude_swap.rotation_owner import (
 )
 from claude_swap.settings import atomic_write_json
 from claude_swap.switcher import ClaudeAccountSwitcher
-from claude_swap.token_probe import probe, select_source
+from claude_swap.token_probe import iso, probe, select_source
 
 ARTIFACT = 'saycode-setup-token-runtime-v1'
 
@@ -210,7 +210,19 @@ class TokenRuntime:
         state['attempts'] = [a for a in state['attempts'] if a['at'] > now - 86400]
         return credentials
 
-    def _row(self, ref, account):
+    def _probe_budget(self, state, account):
+        """Durable local spending view for schedulers/UI; never the private digest."""
+        now, digest = self.clock(), account['digest']
+        used = sum(attempt['at'] > now - 86400 and attempt['digest'] == digest for attempt in state['attempts'])
+        token_state = state['tokens'].get(digest, {})
+        next_at = token_state.get('nextAt', 0)
+        return {'scope': 'local-per-token', 'accountUsed24h': used, 'accountLimit24h': 96,
+                'accountRemaining24h': max(0, 96 - used),
+                'nextProbeAt': iso(next_at) if isinstance(next_at, (int, float)) and next_at > now else None,
+                'failureStreak': int(token_state.get('failures', 0)),
+                'minIntervalSeconds': 300, 'recommendedIntervalSeconds': 900}
+
+    def _row(self, ref, account, state=None):
         now = self.clock()
         obs = account.get('observation')
         status = 'probe-disabled' if not account['consent'] else 'unavailable'
@@ -236,6 +248,8 @@ class TokenRuntime:
             row['observation'] = obs
         if account.get('lastGood'):
             row['lastGood'] = account['lastGood']
+        if state is not None:
+            row['probeBudget'] = self._probe_budget(state, account)
         return row
 
     def status(self):
@@ -243,8 +257,13 @@ class TokenRuntime:
             state = self._load()
             self._sync(state)
             self._save(state)
-            return dict(version=1, artifact=ARTIFACT, accounts=[self._row(ref, a) for ref, a in sorted(state['accounts'].items(), key=lambda pair: int(pair[1]['slot']))],
-                        budget={'machineUsed24h':len(state['attempts']), 'machineLimit24h':288, 'accountLimit24h':96})
+            live = [attempt['at'] for attempt in state['attempts'] if attempt['at'] > self.clock() - 86400]
+            budget = {'machineUsed24h': len(state['attempts']), 'machineLimit24h': 288, 'accountLimit24h': 96,
+                      'machineRemaining24h': max(0, 288 - len(state['attempts'])),
+                      # When the oldest reservation leaves the rolling 24h machine window.
+                      'machineSlotFreesAt': iso(min(live) + 86400) if live else None}
+            return dict(version=1, artifact=ARTIFACT, accounts=[self._row(ref, a, state) for ref, a in sorted(state['accounts'].items(), key=lambda pair: int(pair[1]['slot']))],
+                        budget=budget)
 
     def consent(self, ref, *, enabled, ack_cost=False, expected_generation=None):
         with FileLock(self.state_lock):

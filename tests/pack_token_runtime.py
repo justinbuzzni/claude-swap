@@ -105,6 +105,25 @@ def main():
     assert result['observation']['windows'][0]['pct'] == 40
     assert collect_org(TokenRuntime(switcher), grant)['reason'] == 'permit_replayed'
     assert 'sk-ant-oat01-' not in json.dumps(result)
+    # Personal leg: generation-fenced consent, one fake-HTTP probe, durable budget metadata.
+    personal_token = 'sk-ant-oat01-pack-personal-' + uuid.uuid4().hex  # new token per run: no cooldown reset
+    switcher.add_account_from_token(token=personal_token, email='personal-pack@token.local')
+    personal = TokenRuntime(switcher)
+    prow = next(r for r in personal.status()['accounts'] if r['roster']['email'] == 'personal-pack@token.local')
+    assert 'managedAccountId' not in prow and prow['probeBudget']['accountUsed24h'] == 0
+    try:
+        personal.consent(prow['accountRef'], enabled=True, ack_cost=True,
+                         expected_generation=prow['credentialGeneration'] + 1)
+        raise AssertionError('stale generation consent accepted')
+    except ValueError as error:
+        assert str(error) == 'credential_changed'
+    personal.consent(prow['accountRef'], enabled=True, ack_cost=True, expected_generation=prow['credentialGeneration'])
+    with patch('urllib.request.build_opener', return_value=Opener()):
+        collected = personal.collect(prow['accountRef'], in_use=True, expected_generation=prow['credentialGeneration'])
+    assert collected['account']['observation']['windows'][0]['pct'] == 40
+    budget = next(r for r in personal.status()['accounts'] if r['accountRef'] == prow['accountRef'])['probeBudget']
+    assert budget['accountUsed24h'] == 1 and budget['nextProbeAt'] is not None
+    assert personal_token not in json.dumps(personal.status())
     # Rotation controller in the installed wheel: roster revision stamped,
     # lease fencing, and production (unknown) coverage never applies.
     from claude_swap.rotation_owner import LeaseStore
@@ -126,7 +145,7 @@ def main():
     exported = json.loads(fixture.read_text())['accounts'][0]
     assert exported['displayName'] == 'Pack fixture' and exported['kind'] == 'oauth'
     with zipfile.ZipFile(root / 'dist/claude_swap-0.27.0b1-py3-none-any.whl') as pack:
-        assert {'claude_swap/token_probe.py', 'claude_swap/token_runtime.py',
+        assert {'claude_swap/token_probe.py', 'claude_swap/token_runtime.py', 'claude_swap/org_probe.py',
                 'claude_swap/rotation_owner.py'}.issubset(pack.namelist())
         assert 'saycode-setup-token-runtime-v1' in pack.read('claude_swap/token_runtime.py').decode()
     with tarfile.open(root / 'dist/claude_swap-0.27.0b1.tar.gz') as pack:
@@ -134,7 +153,8 @@ def main():
         assert not any('/.uv-cache/' in name or '/.venv/' in name or '/.ruff_cache/' in name for name in names)
         assert any(name.endswith('specs/token-runtime-contract.md') for name in names)
     print('Installed-wheel smoke passed: marker, managed import/status/replacement/export, '
-          'org fake-HTTP/replay, rotation revision/lease/fail-closed controller, archive contents; '
+          'org fake-HTTP/replay, personal generation CAS/probe/budget, '
+          'rotation revision/lease/fail-closed controller, archive contents; '
           'offline file backend')
 
 

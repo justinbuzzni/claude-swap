@@ -300,3 +300,26 @@ def test_personal_generation_cas_rejects_before_consent_and_transport(runtime):
         assert runtime.collect(ref, in_use=True, expected_generation=2)['reason'] == 'credential_changed'
         http.assert_not_called()
     assert runtime.status()['budget']['machineUsed24h'] == 0
+
+
+def test_status_exposes_secret_free_durable_personal_budget_for_scheduler(runtime):
+    from claude_swap.token_runtime import _timestamp
+    fresh = first(runtime)['probeBudget']
+    assert fresh == {'scope': 'local-per-token', 'accountUsed24h': 0, 'accountLimit24h': 96, 'accountRemaining24h': 96,
+                     'nextProbeAt': None, 'failureStreak': 0, 'minIntervalSeconds': 300, 'recommendedIntervalSeconds': 900}
+    ref = enable(runtime)
+    runtime.switcher.add_account_from_token(token='sk-ant-oat01-fixture-one', email='two@token.local')
+    with patch('claude_swap.token_runtime.probe', return_value=observation(reason='throttled')):
+        runtime.collect(ref, in_use=True)
+    status = runtime.status()
+    one, alias = status['accounts']
+    assert one['probeBudget']['accountUsed24h'] == 1 and one['probeBudget']['accountRemaining24h'] == 95
+    assert one['probeBudget']['failureStreak'] == 1
+    assert _timestamp(one['probeBudget']['nextProbeAt']) >= 2000000000 + 1800  # durable backoff, not the minimum
+    assert alias['probeBudget'] == one['probeBudget']  # aliases of one token share one bucket
+    assert status['budget']['machineRemaining24h'] == 287
+    assert _timestamp(status['budget']['machineSlotFreesAt']) == 2000000000 + 86400
+    state = json.loads(runtime.state_file.read_text())
+    exposed = json.dumps(status)
+    assert all(digest not in exposed for digest in state['tokens'])
+    assert 'fixture-one' not in exposed

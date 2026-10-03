@@ -140,8 +140,12 @@ credentialType:setup_token, managedAccountId UUID, displayName (1..120),
 credentialGeneration positive integer without inventing refreshToken or identity.
 Imports do not imply inference verification, probe opt-in or global activation.
 Rollback: disable consent and use legacy commands; additive runtime state is
-ignored by upstream. No legacy auto policy changed. Runtime never performs a
-switch or claims an apply receipt; storage import receipts remain caller-owned.
+ignored by upstream. No legacy auto policy changed. `status`, `consent`,
+`collect`, `collect-org`, `suggest` and `rotate` without `--apply` never switch.
+Only `rotate --apply` (machine opt-in, lease, guarded CAS; see "Rotation
+ownership") changes the global stored selection through cswap's own switch path,
+and it emits a rotation receipt for exactly that. Storage import receipts remain
+caller-owned.
 
 ## Desktop/Happy compatibility (2026-10-04)
 
@@ -153,9 +157,14 @@ AND exact roster metadata match, and overlay setup-token rows from runtime.
 Never attach legacy lastGood to a new generation by email/org alone. Normal
 OAuth continues to use upstream profile usage; status never calls that endpoint
 or retroactively asserts a source/generation for an old cache. List active state
-is global stored selection, not session active binding. Runtime emits no active
-account or execution receipt. Happy new-session binding must remain disabled:
-upstream `cswap run` active fastpath is not proven to prepare a scrubbed profile.
+is global stored selection, not session active binding. Runtime `status` emits no
+active account. A rotation receipt proves only that the global stored selection
+and live login moved; it is never an execution receipt for any session. This
+runtime does not prepare per-session profiles and does not rely on the upstream
+`cswap run` active fastpath (unproven to scrub a profile). Per-session binding is
+a separate Core (Happy) strategy that injects the selected setup token directly
+into the spawned session's environment; it must not claim this runtime prepared
+a profile, and a runtime rotation never retargets an already running session.
 
 Managed import serializes under existing roster lock and validates same managed
 ID, exact identity, generation and token before writes: higher generation replaces
@@ -176,7 +185,8 @@ by the org lease/server collector, not inferred from this local per-token budget
 Synthetic complete-coverage policy fixtures exercise >=90 trigger, every required
 window <80, minimum max-utilization/stable-ref tie-break and 5min cooldown. No
 production probe establishes complete coverage; no public observation import
-command can mark it verified. Suggestions never apply and never emit a receipt.
+command can mark it verified. `suggest` and `rotate` without `--apply` never apply
+and never emit a receipt.
 
 ## 구현/검증 인수인계 — 2026-10-04
 
@@ -193,10 +203,11 @@ command can mark it verified. Suggestions never apply and never emit a receipt.
 | T11 | 모든 artifact 내부 writer의 selection revision 스탬프(중앙 `_write_json`), legacy/enhanced 단일 lease(epoch), switch lock 안의 guard CAS, 외부/구버전 writer 감지, 2-process 경합 테스트 | Desktop inline·구 binary 등 외부 writer 배제 불가(감지만); 2개 초과 process·장시간 부하는 미측정 |
 | T12 | `rotate` controller: 90/80/max/stable tie/coverage/TTL/reset, 모든 writer 기준 지속 cooldown, 적용 직전 lease·revision·projection·live·후보 digest 재검증 | 실측 model coverage 없음 → production에서 적용 불가(의도) |
 | T13 | 수동/구 binary 경합, live drift, 후보 교체, legacy 소유, 손상 소유 상태, rollback 실패, crash 후 intent 복구, commit 직전 auto/consent/auth/cooldown/TTL/reset 재검증 회귀, 실제 2-process lease·CAS·state lock·controller 경합 | 실제 Keychain/macOS 백엔드에서의 commit 불명 시나리오 미실측 |
-| T14 | 적용 receipt(applied/rejected/failed/unresolved), unresolved 차단·ack, pin 명령, disabled/pin 보존, turn 재전환 금지 | Happy/Desktop의 turn id 공급·receipt 표시 미연결; session별 binding 여전히 비활성 |
+| T14 | 적용 receipt(applied/rejected/failed/unresolved), unresolved 차단·ack, pin 명령, disabled/pin 보존, turn 재전환 금지 | Happy/Desktop의 turn id 공급·receipt 표시 미연결; runtime은 session profile을 준비하지 않음(session binding은 Core direct token env 전략, 별도) |
 
-`cswap run` active fastpath의 profile/env scrub 보장도 미검증이다. Happy는 새
-세션 binding을 열지 않아야 한다. 관리 import CAS는 같은 helper를 쓰는 writer만
+`cswap run` active fastpath의 profile/env scrub 보장은 미검증이며 이 runtime은 그
+경로를 쓰지 않는다. 새 세션 binding은 이 runtime의 profile 준비가 아니라 Core가
+선택된 setup token을 spawn 환경에 직접 주입하는 별도 전략으로만 연다. 관리 import CAS는 같은 helper를 쓰는 writer만
 직렬화하며, crash-durable multi-file 원자성이나 bundle 전체 rollback을 주장하지
 않는다. 이 제한을 해소할 ownership/prepared-profile 후속 작업이 필요하다.
 
@@ -251,7 +262,8 @@ Current roster digest/ref/generation is compared before and after transport, lat
 results discarded. Output `{version:1,artifact,observation,applied:false}` or
 `{version:1,artifact,reason,applied:false}`. Core converts/whitelists observation
 before publish. Missing signer/config/assignment MUST stop before this bridge.
-Automatic rotation and true prepared-profile support are still pending as above.
+Automatic rotation stays capability-gated (`automaticRotation:false`, see
+"Rotation ownership"); this runtime provides no prepared profiles.
 
 Organization bridge validation (2026-10-04):
 `uv run --frozen pytest -n 0 tests/test_org_probe.py tests/test_token_probe.py tests/test_token_runtime.py`
@@ -267,3 +279,32 @@ rejects before consent mutation or budget/transport. Legacy callers omitting it
 keep prior behavior. Happy requires this capability and always supplies generation.
 Personal generation CAS validation: 67 passed across token_runtime/org_probe/token_probe,
 selected E9/F lint passed, rebuilt wheel/sdist and isolated installed-wheel smoke passed.
+
+## Integration (provider branch feat/claude-token-integration, 2026-10-04)
+
+Base `6397291` (organization bridge + personal generation CAS) with rotation
+ownership cherry-picked (`29db313`, `eb33624`, `f51bd28`). Capabilities carry
+both sets: `organizationCollectorVersion:1`, `personalProbeVersion:1`,
+`rotationWriterOwnership`, `rotationReceipt`, `rotationController` true;
+`automaticRotation` and `externalWriterExclusion` false.
+
+Interplay: `collect-org` takes collector lock → state lock → cswap FileLock;
+`rotate` takes controller lock → state lock → cswap FileLock → Claude Code locks
+→ lease/journal. Both share the state→FileLock order, so a guarded apply and an
+organization or personal collection serialize on the state lock and never invert.
+Organization-managed rows have no local consent and no local org observation
+cache, so they are never locally eligible for `rotate`; Core supplies managed
+observations from the server collector separately.
+
+Durable personal budget metadata (additive, secret-free, for Core schedulers/UI):
+each `status.accounts[]` row carries `probeBudget {scope:'local-per-token',
+accountUsed24h, accountLimit24h:96, accountRemaining24h, nextProbeAt (UTC|null),
+failureStreak, minIntervalSeconds:300, recommendedIntervalSeconds:900}`; aliases
+of one token share it. `status.budget` adds `machineRemaining24h` and
+`machineSlotFreesAt` (UTC|null, when the oldest reservation leaves the rolling
+24h window). The token digest itself is never emitted. Organization budget
+authority remains the server permit (`accountRemaining`/`companyRemaining`); the
+local bucket is an additional bound only. Consumers whitelist unknown fields
+(Happy `parseTokenRuntimeStatus` ignores them until it opts in).
+
+Validation and artifact provenance: `specs/integration-provenance.md`.
