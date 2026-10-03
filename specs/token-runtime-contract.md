@@ -51,12 +51,22 @@ Writers inside this artifact all participate; writers outside it cannot:
   Manual writers never take the lease: user intent wins and surfaces to the
   automatic owner as a CAS conflict. With no enhanced owner, legacy behaviour and
   defaults are unchanged.
-- Commit guard: evaluated under cswap's FileLock + Claude Code's credential and
-  config locks before the first write. Rejects (nothing written) on lease lost,
-  revision OR projection digest change (detects unstamped writes by older
-  binaries), live login differing from the decision, or the target slot's
-  identity/credential digest changing (`selection_changed|live_selection_drift|
-  candidate_changed|lease_lost`).
+- Lock order (outermost first): controller lock → token-runtime state lock →
+  cswap FileLock → Claude Code credential/config locks → lease or journal lock.
+  `_sync` already takes state then FileLock, so the guarded apply takes the state
+  lock BEFORE the switch and holds it through re-sync, intent, switch and receipt;
+  the guard (under the switch locks) never locks state, it reads that held copy.
+  Consequence: consent/auto/collect/status calls wait for an in-flight apply
+  (FileLock default timeout 10s), including a slow switch preflight.
+- Commit guard: evaluated under the switch locks before the first write. Rejects
+  (nothing written, receipt `rejected`) on lease lost, revision OR projection
+  digest change (detects unstamped writes by older binaries), live login drift,
+  target identity/credential digest change, auto opt-in off (`auto_disabled`),
+  or when the exact policy re-run at write time — consent, auth, pin/disabled,
+  model coverage, every required window, TTL, reset, cooldown, with the clock
+  read at that moment — no longer picks the same current→candidate
+  (`decision_changed`, receipt `decisionReason` = the new policy reason).
+  A revoked probe consent withdraws that account's observation from decisions.
 - Journal (`rotation-journal.v1.json`, fsync): intent written before the commit;
   receipt after: `applied` only when the roster carries this intent's stamp, the
   active slot is the target and the live login is the target; `rejected` (guard),
@@ -75,6 +85,22 @@ Writers inside this artifact all participate; writers outside it cannot:
 - `automaticRotation:false`: no production observation carries verified model
   coverage, so `--apply` can only succeed with synthetic fixtures. It flips only
   after approved live coverage fixtures exist.
+- Evidence: in-process boundary tests plus real two-process tests
+  (`tests/test_rotation_contention.py`, separate interpreters, isolated file
+  backend, network/profile/Keychain stubbed to fail): lease mutual exclusion,
+  a manual switch in another process rejecting a delayed commit, a consent
+  revocation in another process waiting for the in-flight commit, and two
+  controllers committing at most once. Each was checked to fail when its
+  exclusion is removed (lease lock; state-lock hold; revision CAS; all of
+  controller lock + lease + CAS + state-lock hold for the controller race).
+- Remaining exclusions, not provided by this artifact: (1) writers outside it —
+  Desktop inline switch, upstream/older cswap binaries, manual edits — are only
+  detected (projection/live drift) at the guard; one that writes Claude Code's
+  credentials/config without taking Claude Code's locks inside the commit window
+  is not excluded; (2) any process that reads/writes `sequence.json` without
+  cswap's FileLock; (3) crash between the credential write and the roster write
+  is classified `unresolved` (not repaired); (4) NFS/remote filesystems where
+  flock is not exclusive; (5) model coverage is never verified in production.
 - `externalWriterExclusion:false`: Desktop's inline Claude switch and older
   cswap binaries are not excluded. They are detected at commit (projection/live
   drift) but a non-locking external write racing the commit window is possible.
@@ -164,9 +190,9 @@ command can mark it verified. Suggestions never apply and never emit a receipt.
 | T8 | opaque roster ref, generation/late/reset/TTL 폐기, 기존 setup lastGood/claim 무효화, additive runtime JSON/metadata | TUI/menubar 공통 관측 UI 연결 미구현; 일반 OAuth cache를 source/generation 관측으로 승격하지 않음 |
 | T9 | process간 single-flight, fsync 예산 예약, digest 중복, backoff/jitter, offline/in-use, 공용 refresh 명령 | caller가 주기 호출; 상주 scheduler/다중 머신 collector lease/조직 계정 총예산 미구현; 진행 중 POST는 disable로 강제 중단되지 않고 결과만 폐기 |
 | T10 | setup refresh 부재가 permanent-dead가 되지 않는 회귀, 기존 OAuth/API 회귀 | live 실행/설치 버전 검증 없음 |
-| T11 | 모든 artifact 내부 writer의 selection revision 스탬프(중앙 `_write_json`), legacy/enhanced 단일 lease(epoch), switch lock 안의 guard CAS, 외부/구버전 writer 감지 | Desktop inline·구 binary 등 외부 writer 배제 불가(감지만); 실제 multi-process 부하 경합은 단위 수준만 검증 |
+| T11 | 모든 artifact 내부 writer의 selection revision 스탬프(중앙 `_write_json`), legacy/enhanced 단일 lease(epoch), switch lock 안의 guard CAS, 외부/구버전 writer 감지, 2-process 경합 테스트 | Desktop inline·구 binary 등 외부 writer 배제 불가(감지만); 2개 초과 process·장시간 부하는 미측정 |
 | T12 | `rotate` controller: 90/80/max/stable tie/coverage/TTL/reset, 모든 writer 기준 지속 cooldown, 적용 직전 lease·revision·projection·live·후보 digest 재검증 | 실측 model coverage 없음 → production에서 적용 불가(의도) |
-| T13 | 수동/구 binary 경합, live drift, 후보 교체, legacy 소유, 손상 소유 상태, rollback 실패, crash 후 intent 복구 회귀 | 실제 Keychain/macOS 백엔드에서의 commit 불명 시나리오 미실측 |
+| T13 | 수동/구 binary 경합, live drift, 후보 교체, legacy 소유, 손상 소유 상태, rollback 실패, crash 후 intent 복구, commit 직전 auto/consent/auth/cooldown/TTL/reset 재검증 회귀, 실제 2-process lease·CAS·state lock·controller 경합 | 실제 Keychain/macOS 백엔드에서의 commit 불명 시나리오 미실측 |
 | T14 | 적용 receipt(applied/rejected/failed/unresolved), unresolved 차단·ack, pin 명령, disabled/pin 보존, turn 재전환 금지 | Happy/Desktop의 turn id 공급·receipt 표시 미연결; session별 binding 여전히 비활성 |
 
 `cswap run` active fastpath의 profile/env scrub 보장도 미검증이다. Happy는 새

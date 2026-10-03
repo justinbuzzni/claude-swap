@@ -14,9 +14,12 @@ Three cooperating pieces keep automatic rotation from racing any other writer:
 * Journal: a durable intent written before the commit and a receipt after it.
   An intent with no receipt is recovered by reading the roster, never assumed.
 
-Lock order: switch locks (cswap FileLock + Claude Code locks) may be held while
-the lease lock is taken; nothing holding the lease or journal lock ever takes a
-switch lock.
+Lock order (outermost first): rotation controller lock → token-runtime state
+lock → switch locks (cswap FileLock, then Claude Code's credential and config
+locks) → lease lock / journal lock. ``TokenRuntime._sync`` already takes the
+state lock before the cswap FileLock, so a commit guard running under the switch
+locks must never take the state lock; the guarded apply holds it from before the
+switch instead. Nothing holding the lease or journal lock takes any other lock.
 """
 from __future__ import annotations
 
@@ -46,9 +49,10 @@ _writer: contextvars.ContextVar[tuple[str, str | None]] = contextvars.ContextVar
 class SelectionConflict(Exception):
     """A guarded commit found the selection changed; nothing was written."""
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, detail: str | None = None):
         super().__init__(reason)
         self.reason = reason
+        self.detail = detail
 
 
 @contextmanager

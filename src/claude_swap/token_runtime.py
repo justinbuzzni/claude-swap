@@ -64,6 +64,9 @@ def _timestamp(value):
 def _decision_score(row, model, now):
     if row.get('disabled') or row.get('pinned') or row.get('authState') != 'usable':
         return None
+    # A revoked probe opt-in withdraws this machine's observation from decisions.
+    if row.get('probeEnabled') is False:
+        return None
     obs = row.get('observation') or {}
     coverage = obs.get('coverage')
     if not isinstance(coverage, dict) or coverage.get('model') != model:
@@ -430,11 +433,24 @@ class TokenRuntime:
             lock.release()
 
     def _commit(self, result, data, expected, current, owner, lease, turn_id, model):
+        # Hold the runtime state lock from here through the receipt. Consent,
+        # auto opt-in, observations and auth only change under this lock, so
+        # what the guard re-evaluates cannot move until the switch is done.
+        # Order matches _sync (state lock, then cswap FileLock); the guard,
+        # which runs under the switch locks, only reads this in-memory state.
+        with FileLock(self.state_lock):
+            state = self._load()
+            self._sync(state)
+            self._save(state)
+            return self._guarded_switch(state, result, data, expected, current, owner, lease, turn_id, model)
+
+    def _guarded_switch(self, state, result, data, expected, current, owner, lease, turn_id, model):
         target_ref = result['suggestedRef']
         target = next(row for row in result['accounts'] if row['accountRef'] == target_ref)
         to_slot = str(target['number'])
-        with FileLock(self.state_lock):
-            account = self._load()['accounts'][target_ref]
+        account = state['accounts'].get(target_ref)
+        if account is None:
+            return {**result, 'reason': 'candidate_changed'}
         target_digest = account['digest']
         intent = self.journal.begin({
             'intentId': str(uuid.uuid4()), 'fromRef': current['accountRef'], 'toRef': target_ref,
@@ -459,12 +475,24 @@ class TokenRuntime:
             secret = self.switcher._read_account_credentials(to_slot, identity[0])
             if credential_digest(secret) != target_digest:
                 raise SelectionConflict('candidate_changed')
+            # Re-run the exact policy at write time: auto opt-in, consent, auth,
+            # pin/disabled, coverage, every required window, TTL, reset and
+            # cooldown, with the clock read now (preflight may have been slow).
+            if not state.get('rotation', {}).get('autoEnabled'):
+                raise SelectionConflict('auto_disabled')
+            rows = [self._row(ref, entry) for ref, entry in state['accounts'].items()]
+            decision = choose_suggestion(rows, current['accountRef'], model, self.clock(),
+                                         last_switch_at=self._last_switch_at(now_data))
+            if decision['suggestedRef'] != target_ref or decision['selectedRef'] != current['accountRef']:
+                raise SelectionConflict('decision_changed', decision['reason'])
 
         try:
             with writing_as(ENHANCED_WRITER, intent['intentId']):
                 self.switcher.switch_to(to_slot, json_output=True, guard=guard)
         except SelectionConflict as conflict:
-            receipt = self.journal.finish(intent, 'rejected', reason=conflict.reason, finishedAtEpoch=self.clock())
+            detail = {} if conflict.detail is None else {'decisionReason': conflict.detail}
+            receipt = self.journal.finish(intent, 'rejected', reason=conflict.reason,
+                                          finishedAtEpoch=self.clock(), **detail)
         except Exception as error:  # noqa: BLE001 — every failure is classified, never trusted
             now_data, now_live = self._selection()
             status, reason = classify_commit(intent, now_data, now_live)

@@ -66,6 +66,7 @@ def inject(runtime, pcts, *, coverage=True):
     state = json.loads(runtime.state_file.read_text())
     for ref, account in state['accounts'].items():
         account['authState'] = 'usable'
+        account['consent'] = True
         account['observation'] = complete_obs(ref, account['generation'], pcts[int(account['slot'])],
                                               now=runtime.clock(), coverage=coverage)
     runtime.state_file.write_text(json.dumps(state))
@@ -366,3 +367,109 @@ def test_transaction_rollback_write_never_carries_the_controller_intent(pool):
         assert transaction.rollback(pool.switcher) is True
     stamp = seq(pool)['lastSelection']
     assert stamp['intentId'] is None and stamp['writer'] == 'rollback'
+
+
+# -- the decision itself is revalidated at commit ------------------------------
+
+def _no_write(pool, revision_before, result, decision_reason):
+    assert result['applied'] is False
+    assert result['receipt']['status'] == 'rejected'
+    assert result['receipt']['reason'] == 'decision_changed'
+    assert result['receipt']['decisionReason'] == decision_reason
+    assert live_email(pool) == 'one@token.local'
+    assert seq(pool)['selectionRevision'] == revision_before
+
+
+def _between_decision_and_commit(pool, action):
+    """Run ``action`` after the suggestion, before the guarded commit starts."""
+    real = pool.leases.acquire
+
+    def acquire(owner, **kwargs):
+        action()
+        return real(owner, **kwargs)
+    return patch.object(pool.leases, 'acquire', side_effect=acquire)
+
+
+def _edit_state(pool, mutate):
+    state = json.loads(pool.state_file.read_text())
+    mutate(state)
+    pool.state_file.write_text(json.dumps(state))
+
+
+def test_auto_disabled_after_suggestion_is_rejected_at_commit(pool):
+    armed(pool)
+    revision = seq(pool)['selectionRevision']
+    with _between_decision_and_commit(pool, lambda: pool.set_auto(False)):
+        result = pool.rotate(MODEL, apply=True, owner='desk-1')
+    assert result['receipt']['reason'] == 'auto_disabled'
+    assert result['receipt']['status'] == 'rejected'
+    assert live_email(pool) == 'one@token.local' and seq(pool)['selectionRevision'] == revision
+
+
+def test_candidate_consent_revoked_after_suggestion_is_rejected(pool):
+    armed(pool)
+    revision = seq(pool)['selectionRevision']
+    with _between_decision_and_commit(pool, lambda: pool.consent(refs(pool)[2], enabled=False)):
+        result = pool.rotate(MODEL, apply=True, owner='desk-1')
+    _no_write(pool, revision, result, 'no_eligible_candidate')
+
+
+def test_candidate_auth_invalidated_after_suggestion_is_rejected(pool):
+    armed(pool)
+    revision = seq(pool)['selectionRevision']
+    target = refs(pool)[2]
+    with _between_decision_and_commit(pool, lambda: _edit_state(
+            pool, lambda state: state['accounts'][target].update(authState='invalid'))):
+        result = pool.rotate(MODEL, apply=True, owner='desk-1')
+    _no_write(pool, revision, result, 'no_eligible_candidate')
+
+
+def test_cooldown_started_elsewhere_after_suggestion_is_rejected(pool):
+    armed(pool)
+    revision = seq(pool)['selectionRevision']
+
+    def other_receipt():
+        pool.journal.finish({'intentId': 'other-controller'}, 'applied', finishedAtEpoch=pool.clock())
+    with _between_decision_and_commit(pool, other_receipt):
+        result = pool.rotate(MODEL, apply=True, owner='desk-1')
+    _no_write(pool, revision, result, 'cooldown')
+
+
+def _slow_preflight(pool, action):
+    real = pool.switcher._prefetch_live_identity
+
+    def slow():
+        action()
+        return real()
+    return patch.object(pool.switcher, '_prefetch_live_identity', side_effect=slow)
+
+
+def test_observation_ttl_crossed_during_switch_preflight_is_rejected(pool):
+    armed(pool)
+    revision = seq(pool)['selectionRevision']
+
+    def wait():
+        pool.clock_ref.now += 301
+    with _slow_preflight(pool, wait):
+        result = pool.rotate(MODEL, apply=True, owner='desk-1')
+    _no_write(pool, revision, result, 'coverage_unknown')
+
+
+def test_candidate_reset_crossed_during_switch_preflight_is_rejected(pool):
+    armed(pool)
+    target = refs(pool)[2]
+    _edit_state(pool, lambda state: state['accounts'][target]['observation']['windows'][0].update(resetsAt=iso(NOW + 100)))
+    revision = seq(pool)['selectionRevision']
+
+    def wait():
+        pool.clock_ref.now += 150
+    with _slow_preflight(pool, wait):
+        result = pool.rotate(MODEL, apply=True, owner='desk-1')
+    _no_write(pool, revision, result, 'no_eligible_candidate')
+
+
+def test_consent_revoked_by_suggestion_time_never_suggests(pool):
+    armed(pool)
+    pool.consent(refs(pool)[2], enabled=False)
+    result = pool.rotate(MODEL, apply=True, owner='desk-1')
+    assert result['suggestedRef'] is None and result['applied'] is False
