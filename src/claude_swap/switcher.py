@@ -844,6 +844,15 @@ class ClaudeAccountSwitcher:
         ``Exception`` disarmed exactly that guard for every write routing
         through here.
         """
+        previous = self._read_account_credentials(account_num, email)
+        old_token = oauth.extract_access_token(previous)
+        new_token = oauth.extract_access_token(credentials)
+        if old_token != new_token and any(isinstance(t, str) and t.startswith('sk-ant-oat01-') for t in (old_token, new_token)):
+            data = self._get_sequence_data() or {}
+            org = data.get('accounts', {}).get(account_num, {}).get('organizationUuid') or ''
+            # Clear decision/display state and fence in-flight legacy fetches
+            # BEFORE publishing replacement setup credentials.
+            self._usage_store.invalidate_credentials([account_num], {account_num:(email, org)})
         self._store._write_account_credentials(account_num, email, credentials)
         try:
             self._post_backup_write(account_num, email)
@@ -1763,6 +1772,10 @@ class ClaudeAccountSwitcher:
                     kind=self._account_kind(n),
                     switchable=self._account_is_switchable(n),
                     usage=entries[n],
+                    credential_type=seq_data.get('accounts', {}).get(n, {}).get('credentialType'),
+                    managed_account_id=seq_data.get('accounts', {}).get(n, {}).get('managedAccountId'),
+                    display_name=seq_data.get('accounts', {}).get(n, {}).get('displayName'),
+                    credential_generation=seq_data.get('accounts', {}).get(n, {}).get('credentialGeneration'),
                     alias=alias,
                     disabled=self._disabled_from_data(seq_data, n),
                 )
@@ -3761,6 +3774,7 @@ class ClaudeAccountSwitcher:
         """
         self._refuse_session_shell()
         import getpass
+        from uuid import uuid4
 
         if token == "-":
             token = sys.stdin.readline().rstrip("\n")
@@ -3916,13 +3930,17 @@ class ClaudeAccountSwitcher:
         )
 
         data = self._get_sequence_data()
+        previous = data.get("accounts", {}).get(account_num, {})
         record = {
+            "runtimeAccountRef": previous.get("runtimeAccountRef") or str(uuid4()),
             "email": email,
             "uuid": "",
             "organizationUuid": "",
             "organizationName": "",
             "added": get_timestamp(),
         }
+        if token.startswith("sk-ant-oat01-"):
+            record["credentialType"] = "setup_token"
         if is_api_key:
             record["kind"] = "api_key"
         data["accounts"][account_num] = record
@@ -5502,6 +5520,8 @@ class ClaudeAccountSwitcher:
                     login_expires_at=oauth.login_expires_at_iso(creds),
                 )
             )
+            record = seq_data.get('accounts', {}).get(str(num), {})
+            accounts[-1].update({key:record[key] for key in ('credentialType', 'managedAccountId', 'displayName', 'credentialGeneration', 'runtimeAccountRef') if key in record})
         payload = {
             "schemaVersion": SCHEMA_VERSION,
             "activeAccountNumber": active_num,

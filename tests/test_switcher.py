@@ -12486,3 +12486,13 @@ class TestSessionShellGuardCoversEveryMutator:
         s = self._switcher(sample_sequence_data, monkeypatch)
         with pytest.raises(SwitchError):
             s.unset_alias("2")
+
+
+def test_account_info_preserves_managed_setup_metadata():
+    from claude_swap.models import AccountInfo
+    record = {'email':'id@token.local','credentialType':'setup_token',
+              'managedAccountId':'11111111-1111-4111-8111-111111111111',
+              'displayName':'조직 계정','credentialGeneration':4}
+    result = AccountInfo.from_dict(1,record).to_dict()
+    for field in ('credentialType','managedAccountId','displayName','credentialGeneration'):
+        assert result[field] == record[field]

@@ -10,8 +10,10 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -26,6 +28,8 @@ from claude_swap.fsutil import replace_with_retry
 from claude_swap.json_output import SCHEMA_VERSION as JSON_SCHEMA_VERSION
 from claude_swap.json_output import usage_from_json
 from claude_swap.models import Platform, get_timestamp, normalize_alias
+from claude_swap.locking import FileLock
+from claude_swap.oauth import extract_access_token
 from claude_swap.oauth import credential_fingerprint
 
 if TYPE_CHECKING:
@@ -33,6 +37,41 @@ if TYPE_CHECKING:
 
 
 FORMAT_VERSION = 1
+MANAGED_FIELDS = ("credentialType", "managedAccountId", "displayName", "credentialGeneration")
+
+
+def _managed_metadata(account: dict) -> dict:
+    """Validate managed setup fields without reflecting untrusted values."""
+    metadata = {key: account[key] for key in MANAGED_FIELDS if key in account}
+    if not metadata:
+        return {}
+    if metadata.get("credentialType") != "setup_token":
+        raise TransferError("unsupported managed credential type")
+    if "managedAccountId" in metadata:
+        try:
+            value = metadata["managedAccountId"]
+            if not isinstance(value, str) or str(uuid.UUID(value)) != value:
+                raise ValueError
+        except (ValueError, TypeError, AttributeError):
+            raise TransferError("invalid managed account ID") from None
+        if any(key not in metadata for key in MANAGED_FIELDS):
+            raise TransferError("incomplete managed metadata")
+    if "displayName" in metadata:
+        name = metadata["displayName"]
+        if not isinstance(name, str) or not 1 <= len(name.strip()) <= 120 or any(ord(c) < 32 for c in name):
+            raise TransferError("invalid managed display name")
+    if "credentialGeneration" in metadata:
+        generation = metadata["credentialGeneration"]
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+            raise TransferError("invalid credential generation")
+    credentials = account.get("credentials")
+    oauth = credentials.get("claudeAiOauth") if isinstance(credentials, dict) else None
+    token = oauth.get("accessToken") if isinstance(oauth, dict) else None
+    if account.get("kind") == "api_key" or not isinstance(token, str) or not token.startswith("sk-ant-oat01-"):
+        raise TransferError("managed metadata requires setup-token credentials")
+    if not 1 <= len(token) <= 4096 or re.fullmatch(r'[A-Za-z0-9_-]+', token) is None:
+        raise TransferError('invalid managed setup-token format')
+    return metadata
 
 _PLATFORM_TAG = {
     Platform.MACOS: "macos",
@@ -214,7 +253,8 @@ def export_accounts(
         org_uuid = record.get("organizationUuid", "") or ""
 
         is_active = (
-            current_identity is not None
+            not record.get('managedAccountId')
+            and current_identity is not None
             and current_identity[0] == email
             and current_identity[1] == org_uuid
         )
@@ -274,8 +314,11 @@ def export_accounts(
         }
         if is_api_key:
             entry["kind"] = "api_key"
+        elif record.get('credentialType') == 'setup_token':
+            entry['kind'] = 'oauth'
         if record.get("alias"):
             entry["alias"] = record["alias"]
+        entry.update({key: record[key] for key in MANAGED_FIELDS if key in record})
         accounts_payload.append(entry)
 
     if not accounts_payload:
@@ -347,6 +390,13 @@ def import_accounts(
     except json.JSONDecodeError as exc:
         raise TransferError(f"export file is not valid JSON: {exc}")
 
+    # Import CAS is serialized with cooperating roster writers. Legacy external
+    # writers are not all owned, so automatic rotation stays unavailable.
+    with FileLock(switcher.lock_file):
+        _import_envelope(switcher, envelope, force)
+
+
+def _import_envelope(switcher, envelope, force):
     if not isinstance(envelope, dict):
         raise TransferError("export file must be a JSON object")
 
@@ -379,9 +429,17 @@ def import_accounts(
     normalized: list[dict[str, Any]] = []
     seen_keys: set[tuple[str, str]] = set()
     seen_aliases: set[str] = set()
+    seen_managed: set[tuple[str, str]] = set()
     for raw in accounts:
         email, exported_num = _validate_imported_account(switcher, raw)
         org_uuid = raw.get("organizationUuid", "") or ""
+        metadata = _managed_metadata(raw)
+        managed_id = metadata.get("managedAccountId")
+        if managed_id:
+            managed_key = (org_uuid, managed_id)
+            if managed_key in seen_managed:
+                raise TransferError("duplicate managed account ID")
+            seen_managed.add(managed_key)
         creds_obj = raw.get("credentials")
         config_obj = raw.get("config")
         if not isinstance(config_obj, dict):
@@ -401,6 +459,24 @@ def import_accounts(
                     f"credentials for {email} must be a JSON object"
                 )
             creds_text = json.dumps(creds_obj)
+        if managed_id:
+            matches = [(n, a) for n, a in local_data.get('accounts', {}).items() if a.get('managedAccountId') == managed_id]
+            if len(matches) > 1:
+                raise TransferError('managed identity conflict')
+            if matches:
+                existing_num, existing = matches[0]
+                if existing.get('email') != email or (existing.get('organizationUuid') or '') != org_uuid:
+                    raise TransferError('managed identity conflict')
+                current_generation = existing.get('credentialGeneration', 0)
+                incoming_generation = metadata['credentialGeneration']
+                same_token = extract_access_token(switcher._read_account_credentials(existing_num, email)) == extract_access_token(creds_text)
+                if incoming_generation < current_generation or (incoming_generation == current_generation and not same_token):
+                    raise TransferError('managed generation conflict')
+        local_slot = switcher._find_account_slot(local_data, email, org_uuid)
+        if local_slot is not None:
+            current_managed_id = local_data['accounts'][local_slot].get('managedAccountId')
+            if current_managed_id != managed_id and (current_managed_id or managed_id):
+                raise TransferError('managed identity conflict')
         key = (email, org_uuid)
         if key in seen_keys:
             raise TransferError(
@@ -434,6 +510,7 @@ def import_accounts(
                 "added": raw.get("added") or get_timestamp(),
                 "kind": "api_key" if is_api_key else "oauth",
                 "alias": alias,
+                "metadata": metadata,
                 "creds_text": creds_text,
                 "config_text": json.dumps(config_obj, indent=2),
             }
@@ -478,7 +555,8 @@ def import_accounts(
         )
 
         if existing_slot is not None:
-            if force:
+            managed_upgrade = bool(entry['metadata'].get('managedAccountId')) and entry['metadata']['credentialGeneration'] > data['accounts'][existing_slot].get('credentialGeneration', 0)
+            if force or managed_upgrade:
                 outcome = "overwrote"
                 # Snapshot the row before the write path's clear_dead_token
                 # wipes it, so the "Overwrote" print can say the strike was
@@ -537,42 +615,61 @@ def import_accounts(
                 target_num = str(switcher._get_next_account_number())
             outcome = "imported"
 
-        switcher._write_account_credentials(
-            target_num, entry["email"], entry["creds_text"]
-        )
-        switcher._write_account_config(
-            target_num, entry["email"], entry["config_text"]
-        )
-        # Every successful import write introduces credential material whose
-        # previous auth verdict is no longer authoritative, so lift any
-        # dead-token quarantine on this slot (mirrors add_account / the
-        # add-token paths). This clears for both "imported" and "overwrote":
-        # account removal doesn't prune usage.json, so re-importing a removed
-        # identity into the same slot would otherwise stay quarantined and
-        # never re-fetch to prove the imported token — issue #138.
-        switcher._usage_store.clear_dead_token(
-            [target_num], {target_num: (entry["email"], entry["org_uuid"])}
-        )
+        managed_replacement = bool(entry['metadata'].get('managedAccountId')) and existing_slot is not None
+        rollback_data = json.loads(json.dumps(data)) if managed_replacement else None
+        rollback_creds = switcher._read_account_credentials(target_num, entry['email']) if managed_replacement else None
+        rollback_config = switcher._read_account_config(target_num, entry['email']) if managed_replacement else None
+        try:
+            if managed_replacement:
+                switcher._usage_store.invalidate_credentials([target_num], {target_num:(entry['email'], entry['org_uuid'])})
+            switcher._write_account_credentials(
+                target_num, entry["email"], entry["creds_text"]
+            )
+            switcher._write_account_config(
+                target_num, entry["email"], entry["config_text"]
+            )
+            # Every successful import write introduces credential material whose
+            # previous auth verdict is no longer authoritative, so lift any
+            # dead-token quarantine on this slot (mirrors add_account / the
+            # add-token paths). This clears for both "imported" and "overwrote":
+            # account removal doesn't prune usage.json, so re-importing a removed
+            # identity into the same slot would otherwise stay quarantined and
+            # never re-fetch to prove the imported token — issue #138.
+            switcher._usage_store.clear_dead_token(
+                [target_num], {target_num: (entry["email"], entry["org_uuid"])}
+            )
 
-        data.setdefault("accounts", {})
-        data.setdefault("sequence", [])
-        new_record = {
-            "email": entry["email"],
-            "uuid": entry["uuid"],
-            "organizationUuid": entry["org_uuid"],
-            "organizationName": entry["org_name"],
-            "added": entry["added"],
-        }
-        if entry["kind"] == "api_key":
-            new_record["kind"] = "api_key"
-        if entry.get("alias"):
-            new_record["alias"] = entry["alias"]
-        data["accounts"][target_num] = new_record
-        if int(target_num) not in data["sequence"]:
-            data["sequence"].append(int(target_num))
-            data["sequence"].sort()
-        data["lastUpdated"] = get_timestamp()
-        switcher._write_json(switcher.sequence_file, data)
+            data.setdefault("accounts", {})
+            data.setdefault("sequence", [])
+            previous = data["accounts"].get(target_num, {})
+            new_record = {
+                "runtimeAccountRef": previous.get("runtimeAccountRef") or str(uuid.uuid4()),
+                "email": entry["email"],
+                "uuid": entry["uuid"],
+                "organizationUuid": entry["org_uuid"],
+                "organizationName": entry["org_name"],
+                "added": entry["added"],
+            }
+            if entry["kind"] == "api_key":
+                new_record["kind"] = "api_key"
+            if entry.get("alias"):
+                new_record["alias"] = entry["alias"]
+            new_record.update(entry["metadata"])
+            data["accounts"][target_num] = new_record
+            if int(target_num) not in data["sequence"]:
+                data["sequence"].append(int(target_num))
+                data["sequence"].sort()
+            data["lastUpdated"] = get_timestamp()
+            switcher._write_json(switcher.sequence_file, data)
+        except BaseException:
+            if managed_replacement:
+                try:
+                    switcher._store._write_account_credentials(target_num, entry['email'], rollback_creds)
+                    switcher._write_account_config(target_num, entry['email'], rollback_config)
+                    switcher._write_json(switcher.sequence_file, rollback_data)
+                except Exception:
+                    raise TransferError('managed replacement rollback requires recovery') from None
+            raise
 
         if is_envelope_active:
             resolved_active_slot = target_num

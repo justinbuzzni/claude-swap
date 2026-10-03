@@ -85,6 +85,10 @@ class AccountInfo:
     organization_name: str
     added: str
     number: int
+    credential_type: str | None = None
+    managed_account_id: str | None = None
+    display_name: str | None = None
+    credential_generation: int | None = None
 
     @property
     def is_organization(self) -> bool:
@@ -107,17 +111,26 @@ class AccountInfo:
             organization_name=data.get("organizationName", "") or "",
             added=data.get("added", ""),
             number=number,
+            credential_type=data.get('credentialType'),
+            managed_account_id=data.get('managedAccountId'),
+            display_name=data.get('displayName'),
+            credential_generation=data.get('credentialGeneration'),
         )
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
-        return {
+        result = {
             "email": self.email,
             "uuid": self.uuid,
             "organizationUuid": self.organization_uuid,
             "organizationName": self.organization_name,
             "added": self.added,
         }
+        for key, value in (('credentialType', self.credential_type), ('managedAccountId', self.managed_account_id),
+                           ('displayName', self.display_name), ('credentialGeneration', self.credential_generation)):
+            if value is not None:
+                result[key] = value
+        return result
 
 
 @dataclass(frozen=True)
@@ -140,6 +153,10 @@ class AccountSnapshot:
     usage: UsageEntry
     alias: str = ""
     disabled: bool = False  # held out of auto-rotation (still a valid explicit target)
+    credential_type: str | None = None
+    managed_account_id: str | None = None
+    display_name: str | None = None
+    credential_generation: int | None = None
 
     @property
     def display_tag(self) -> str:

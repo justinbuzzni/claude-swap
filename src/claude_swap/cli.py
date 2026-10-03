@@ -977,6 +977,16 @@ def _menubar_service(args) -> int:
 
 def main() -> None:
     """Main entry point for the CLI."""
+    if sys.argv[1:2] == ["token-runtime"]:
+        from claude_swap.token_runtime import command
+        try:
+            command(sys.argv[2:])
+        except (ClaudeSwitchError, ValueError, OSError):
+            # Never echo exception repr or untrusted credential inputs.
+            print(json.dumps({"version": 1, "artifact": "saycode-setup-token-runtime-v1",
+                              "error": "token_runtime_unavailable"}))
+            sys.exit(1)
+        return
     force_utf8_output()
     _use_native_tls()
     argv = sys.argv[1:]
