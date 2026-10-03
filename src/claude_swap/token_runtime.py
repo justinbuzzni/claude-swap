@@ -27,6 +27,12 @@ def capabilities():
                 rotationWriterOwnership=False)
 
 
+def credential_digest(secret):
+    """Private per-credential digest; the bearer itself when it is OAuth JSON."""
+    token = (extract_oauth_data(secret) or {}).get('accessToken')
+    return hashlib.sha256((token if isinstance(token, str) else secret).encode()).hexdigest()
+
+
 def _timestamp(value):
     try:
         return datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
@@ -146,7 +152,7 @@ class TokenRuntime:
                 secret = self.switcher._read_account_credentials(slot, record['email'])
                 oauth = extract_oauth_data(secret) or {}
                 token = oauth.get('accessToken')
-                digest = hashlib.sha256((token if isinstance(token, str) else secret).encode()).hexdigest()
+                digest = credential_digest(secret)
                 scope = [record.get('organizationUuid') or '', record.get('managedAccountId') or '']
                 old = state['accounts'].get(ref)
                 managed_gen = record.get('credentialGeneration', 1)
