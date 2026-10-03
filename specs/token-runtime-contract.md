@@ -18,11 +18,69 @@ Commands (JSON stdout; no raw credential arguments):
   is also the manual refresh path; status never schedules requests.
 - `cswap token-runtime suggest --current ACCOUNT_REF --model MODEL`: dry run only;
   no switching, process restart, or turn replay.
+- `cswap token-runtime rotate --model MODEL [--apply --owner ID] [--turn-id T]`:
+  controller (see "Rotation ownership"). Without `--apply` it is a dry run.
+- `cswap token-runtime auto --enable|--disable`: machine opt-in for `--apply`
+  (default off). `pin ACCOUNT_REF --on|--off`, `receipts [--ack INTENT_ID]`,
+  `lease status|acquire|release --owner ID [--ttl S]`.
 
 Envelope `{version:1, artifact, ...}`. Capabilities: setupTokenObservation,
-managedAccountMetadata, durableProbeBudget, rotationSuggestion true;
-automaticRotation and rotationWriterOwnership false. Existing writers do not all
-participate in CAS/ownership, therefore new automatic rotation is unavailable.
+managedAccountMetadata, durableProbeBudget, rotationSuggestion,
+rotationWriterOwnership, rotationReceipt, rotationController true;
+automaticRotation and externalWriterExclusion false (see below).
+
+## Rotation ownership (T11–T14, 2026-10-04)
+
+Writers inside this artifact all participate; writers outside it cannot:
+
+- Selection revision: every `sequence.json` write goes through `_write_json`,
+  which advances `selectionRevision` when the selection projection changes
+  (activeAccountNumber, sequence order, per-slot email/org/uuid/disabled/pinned/
+  managedAccountId/credentialGeneration) and stamps `lastSelection {revision,
+  writer, intentId, at}` plus `lastActiveChangeAt` on an active change. Covered
+  without per-site edits: CLI switch/switch-to, TUI, menubar, legacy auto,
+  add/remove/swap/move/disable, import, transaction rollback, pin. Labels:
+  `manual-cli|tui|menubar|legacy-auto|setup-token-auto|manual-pin|rollback|cswap`.
+- Lease (`rotation-owner.v1.json`, epoch fenced, TTL 600s enhanced / 900s legacy):
+  one automatic owner per pool. All legacy auto engines share the owner
+  `legacy-auto` (their existing state-lock/cooldown serialization is unchanged),
+  claimed inside the switch lock on each legacy switch. While an enhanced owner
+  holds it, the legacy engine emits `no-switch: rotation-owned` and does not
+  switch; while legacy holds it the controller returns `rotation_owned_elsewhere`.
+  Corrupt ownership state fails closed for both (`ownership_state_invalid`).
+  Manual writers never take the lease: user intent wins and surfaces to the
+  automatic owner as a CAS conflict. With no enhanced owner, legacy behaviour and
+  defaults are unchanged.
+- Commit guard: evaluated under cswap's FileLock + Claude Code's credential and
+  config locks before the first write. Rejects (nothing written) on lease lost,
+  revision OR projection digest change (detects unstamped writes by older
+  binaries), live login differing from the decision, or the target slot's
+  identity/credential digest changing (`selection_changed|live_selection_drift|
+  candidate_changed|lease_lost`).
+- Journal (`rotation-journal.v1.json`, fsync): intent written before the commit;
+  receipt after: `applied` only when the roster carries this intent's stamp, the
+  active slot is the target and the live login is the target; `rejected` (guard),
+  `failed` (nothing changed: revision and live login as before), `unresolved`
+  (anything else, including "rollback also failed"). An intent without a receipt
+  is recovered under the controller lock from the roster alone. An unacknowledged
+  `unresolved` receipt blocks further `--apply` (`unresolved_receipt`) until
+  `receipts --ack`; it still counts toward the cooldown.
+- Policy: existing `choose_suggestion` (current >=90, every required window of
+  each candidate <80, min max-utilization, stable-ref tie, TTL 5 min, reset
+  boundary, auth usable, disabled/pinned excluded, pinned or disabled current
+  never rotated). Cooldown 5 min from the latest active change by ANY writer or
+  applied/unresolved receipt. `--turn-id` already used by an applied/unresolved
+  receipt is refused. The controller never edits disabled/pinned, never restarts
+  processes, never replays turns, never probes.
+- `automaticRotation:false`: no production observation carries verified model
+  coverage, so `--apply` can only succeed with synthetic fixtures. It flips only
+  after approved live coverage fixtures exist.
+- `externalWriterExclusion:false`: Desktop's inline Claude switch and older
+  cswap binaries are not excluded. They are detected at commit (projection/live
+  drift) but a non-locking external write racing the commit window is possible.
+  Consumers MUST stop their own Claude automatic writers before enabling
+  `auto --enable`, and may hold the lease via `lease acquire` to keep legacy
+  engines out.
 
 Account DTO: accountRef (opaque local UUID), credentialGeneration, label,
 identityConfidence (`user-labeled|saved-metadata|unresolved`), credentialType,
@@ -106,10 +164,10 @@ command can mark it verified. Suggestions never apply and never emit a receipt.
 | T8 | opaque roster ref, generation/late/reset/TTL 폐기, 기존 setup lastGood/claim 무효화, additive runtime JSON/metadata | TUI/menubar 공통 관측 UI 연결 미구현; 일반 OAuth cache를 source/generation 관측으로 승격하지 않음 |
 | T9 | process간 single-flight, fsync 예산 예약, digest 중복, backoff/jitter, offline/in-use, 공용 refresh 명령 | caller가 주기 호출; 상주 scheduler/다중 머신 collector lease/조직 계정 총예산 미구현; 진행 중 POST는 disable로 강제 중단되지 않고 결과만 폐기 |
 | T10 | setup refresh 부재가 permanent-dead가 되지 않는 회귀, 기존 OAuth/API 회귀 | live 실행/설치 버전 검증 없음 |
-| T11 | managed import의 기존 roster lock/CAS; auto capability false | auto/TUI/menubar/manual/외부 legacy 모든 writer의 owner/lease/CAS 미구현 |
-| T12 | 실제 suggest 경로에 연결된 90/80/max/stable tie/coverage/TTL/reset/pin 정책, synthetic 테스트 | 실측 coverage 없음; switch cooldown의 지속·실제 적용 전 재검증은 writer 단계 필요 |
-| T13 | unknown/stale/reset/401/403/429/교체/late/예산/POST 이전 쓰기 실패/managed rollback fixture | owner 경합/실제 switch commit 불명/receipt failure 통합 회귀 미구현 |
-| T14 | dry-run, no apply/no replay, disabled/pin 후보 제외 | 실제 적용 receipt와 수동 pin controller/turn별 전환 제어 미구현 |
+| T11 | 모든 artifact 내부 writer의 selection revision 스탬프(중앙 `_write_json`), legacy/enhanced 단일 lease(epoch), switch lock 안의 guard CAS, 외부/구버전 writer 감지 | Desktop inline·구 binary 등 외부 writer 배제 불가(감지만); 실제 multi-process 부하 경합은 단위 수준만 검증 |
+| T12 | `rotate` controller: 90/80/max/stable tie/coverage/TTL/reset, 모든 writer 기준 지속 cooldown, 적용 직전 lease·revision·projection·live·후보 digest 재검증 | 실측 model coverage 없음 → production에서 적용 불가(의도) |
+| T13 | 수동/구 binary 경합, live drift, 후보 교체, legacy 소유, 손상 소유 상태, rollback 실패, crash 후 intent 복구 회귀 | 실제 Keychain/macOS 백엔드에서의 commit 불명 시나리오 미실측 |
+| T14 | 적용 receipt(applied/rejected/failed/unresolved), unresolved 차단·ack, pin 명령, disabled/pin 보존, turn 재전환 금지 | Happy/Desktop의 turn id 공급·receipt 표시 미연결; session별 binding 여전히 비활성 |
 
 `cswap run` active fastpath의 profile/env scrub 보장도 미검증이다. Happy는 새
 세션 binding을 열지 않아야 한다. 관리 import CAS는 같은 helper를 쓰는 writer만

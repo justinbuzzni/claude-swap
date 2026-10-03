@@ -53,6 +53,7 @@ from claude_swap.credentials import (  # noqa: F401  (constants re-exported for 
 )
 from claude_swap.fsutil import read_text_with_retry
 from claude_swap.locking import FileLock
+from claude_swap.rotation_owner import stamp_selection
 from claude_swap.logging_config import setup_logging
 from claude_swap.models import (
     AccountSnapshot,
@@ -558,6 +559,15 @@ class ClaudeAccountSwitcher:
 
     def _write_json(self, path: Path, data: dict) -> None:
         """Write JSON file with validation."""
+        if path == self.sequence_file:
+            # Every roster writer participates in rotation ownership: a
+            # selection change advances the durable revision a guarded
+            # automatic commit compares against (rotation_owner).
+            try:
+                previous = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                previous = {}
+            stamp_selection(data, previous if isinstance(previous, dict) else {})
         content = json.dumps(data, indent=2)
 
         # Write to temp file first
@@ -6224,13 +6234,21 @@ class ClaudeAccountSwitcher:
         )
 
     def switch_to(
-        self, identifier: str, json_output: bool = False, force: bool = False
+        self,
+        identifier: str,
+        json_output: bool = False,
+        force: bool = False,
+        guard=None,
     ) -> dict | None:
         """Switch to specific account.
 
         ``force`` activates the target's stored credentials directly, skipping
         both the already-active no-op guard and the backup-current step —
         the recovery path for a live login gone stale (e.g. after --import).
+
+        ``guard(data, live_identity)`` runs under the switch locks before any
+        mutation; raising (``SelectionConflict``) aborts with nothing written.
+        Automatic writers use it for lease and compare-and-set checks.
         """
         if not self.sequence_file.exists():
             raise ConfigError("No accounts are managed yet")
@@ -6329,6 +6347,8 @@ class ClaudeAccountSwitcher:
             emit_output=not json_output,
             force_activate=force,
             provenance=provenance,
+            # Only guarded (automatic) writers pass a guard; manual call shape is unchanged.
+            **({"guard": guard} if guard is not None else {}),
         )
         result = self._switch_result_from_op(op, "direct") if json_output else None
         # A forced self-activation really rewrote the live credentials from the
@@ -6715,6 +6735,7 @@ class ClaudeAccountSwitcher:
         emit_output: bool = True,
         force_activate: bool = False,
         provenance: dict | None = None,
+        guard=None,
     ) -> dict:
         """Perform the actual account switch with transaction support.
 
@@ -6814,6 +6835,10 @@ class ClaudeAccountSwitcher:
             target_email = data["accounts"][target_account]["email"]
             to_ref = account_ref(int(target_account), target_email)
             current_identity = self._get_current_account()
+            if guard is not None:
+                # Before any credential/config/roster write: a refusal here
+                # leaves every store exactly as it was.
+                guard(data, current_identity)
             if current_identity is not None:
                 current_email, current_org_uuid = current_identity
                 current_account = self._find_account_slot(

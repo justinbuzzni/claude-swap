@@ -1,4 +1,4 @@
-"""Opt-in machine collector. Legacy writers remain separate; no auto apply."""
+"""Opt-in machine collector and fail-closed setup-token rotation controller."""
 from __future__ import annotations
 
 import argparse
@@ -11,8 +11,18 @@ import time
 import uuid
 from datetime import datetime
 
+from claude_swap.exceptions import SwitchError
 from claude_swap.locking import FileLock
 from claude_swap.oauth import extract_oauth_data
+from claude_swap.rotation_owner import (
+    LeaseStore,
+    RotationJournal,
+    SelectionConflict,
+    classify_commit,
+    fingerprint,
+    slot_identity,
+    writing_as,
+)
 from claude_swap.settings import atomic_write_json
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.token_probe import probe, select_source
@@ -20,11 +30,22 @@ from claude_swap.token_probe import probe, select_source
 ARTIFACT = 'saycode-setup-token-runtime-v1'
 
 
+ENHANCED_WRITER = 'setup-token-auto'
+COOLDOWN_SECONDS = 300
+
+
 def capabilities():
+    # rotationWriterOwnership: every writer inside this artifact stamps the
+    # selection revision and the legacy engine shares the lease. Writers
+    # outside it (Desktop inline switch, older binaries) cannot be excluded,
+    # only detected at commit — consumers must stand their own writers down.
+    # automaticRotation stays false: no production observation proves model
+    # coverage, so the controller can never find an eligible candidate.
     return dict(version=1, artifact=ARTIFACT, setupTokenObservation=True,
                 managedAccountMetadata=True, durableProbeBudget=True, organizationCollectorVersion=1, personalProbeVersion=1,
                 rotationSuggestion=True, automaticRotation=False,
-                rotationWriterOwnership=False)
+                rotationWriterOwnership=True, rotationReceipt=True,
+                rotationController=True, externalWriterExclusion=False)
 
 
 def credential_digest(secret):
@@ -108,6 +129,9 @@ class TokenRuntime:
         self.state_file = switcher.backup_dir / 'token-runtime.v1.json'
         self.state_lock = switcher.backup_dir / '.token-runtime-state.lock'
         self.collector_lock = switcher.backup_dir / '.token-runtime-collector.lock'
+        self.controller_lock = switcher.backup_dir / '.rotation-controller.lock'
+        self.leases = LeaseStore(switcher.backup_dir, clock=clock)
+        self.journal = RotationJournal(switcher.backup_dir, clock=clock)
 
     def _load(self):
         if not self.state_file.exists():
@@ -201,7 +225,7 @@ class TokenRuntime:
                    credentialGeneration=account['generation'], label=account['label'],
                    identityConfidence=account['identityConfidence'], credentialType=account['credentialType'],
                    authState=account['authState'], usageStatus=status, decisionEligible=False,
-                   reasonCodes=[reason, 'coverage_unknown', 'writer_ownership_unavailable'],
+                   reasonCodes=[reason, 'coverage_unknown'],
                    probeEnabled=account['consent'], disabled=account['disabled'], pinned=account['pinned'])
         if account['scope'][1]:
             row['managedAccountId'] = account['scope'][1]
@@ -303,6 +327,156 @@ class TokenRuntime:
         finally:
             lock.release()
 
+    # -- rotation controller ---------------------------------------------------
+
+    def set_auto(self, enabled):
+        """Explicit machine opt-in for applying suggestions; default off."""
+        with FileLock(self.state_lock):
+            state = self._load()
+            rotation = state.setdefault('rotation', {})
+            rotation['autoEnabled'] = bool(enabled)
+            self._save(state)
+            return dict(version=1, artifact=ARTIFACT, automaticApply=bool(enabled))
+
+    def _auto_enabled(self):
+        with FileLock(self.state_lock):
+            return bool(self._load().get('rotation', {}).get('autoEnabled'))
+
+    def pin(self, ref, pinned):
+        with FileLock(self.switcher.lock_file):
+            data = self.switcher._get_sequence_data() or {}
+            slot = next((slot for slot, record in data.get('accounts', {}).items()
+                         if record.get('runtimeAccountRef') == ref), None)
+            if slot is None:
+                raise ValueError('account_not_found')
+            record = data['accounts'][slot]
+            if pinned:
+                record['pinned'] = True
+            else:
+                record.pop('pinned', None)
+            with writing_as('manual-pin'):
+                self.switcher._write_json(self.switcher.sequence_file, data)
+        return dict(version=1, artifact=ARTIFACT, accountRef=ref, pinned=bool(pinned))
+
+    def acknowledge(self, intent_id):
+        if not self.journal.acknowledge(intent_id):
+            raise ValueError('receipt_not_found')
+        return dict(version=1, artifact=ARTIFACT, intentId=intent_id, acknowledged=True)
+
+    def receipts(self):
+        return dict(version=1, artifact=ARTIFACT, pending=self.journal.pending(), receipts=self.journal.receipts())
+
+    def _selection(self):
+        with FileLock(self.switcher.lock_file):
+            data = self.switcher._get_sequence_data() or {}
+            return data, self.switcher._get_current_account()
+
+    def _recover(self):
+        """Settle an intent left by a dead controller from the roster alone."""
+        pending = self.journal.pending()
+        if not pending:
+            return None
+        data, live = self._selection()
+        status, reason = classify_commit(pending, data, live)
+        return self.journal.finish(pending, status, reason=reason, recovered=True)
+
+    def _last_switch_at(self, data):
+        moments = [data.get('lastActiveChangeAt')]
+        moments += [r.get('finishedAtEpoch') for r in self.journal.receipts() if r.get('status') in ('applied', 'unresolved')]
+        moments = [m for m in moments if isinstance(m, (int, float)) and not isinstance(m, bool)]
+        return max(moments) if moments else None
+
+    def rotate(self, model, *, apply=False, owner=None, turn_id=None):
+        lock = FileLock(self.controller_lock, timeout=0)
+        if not lock.acquire():
+            return dict(version=1, artifact=ARTIFACT, model=model, applied=False, automaticRotation=False,
+                        selectedRef=None, suggestedRef=None, reason='controller_busy')
+        try:
+            # Holding the controller lock, a pending intent belongs to a dead process.
+            self._recover()
+            data, live = self._selection()
+            expected = fingerprint(data, live)
+            rows = self.status()['accounts']
+            result = dict(version=1, artifact=ARTIFACT, model=model, accounts=rows, applied=False,
+                          automaticRotation=False, selectedRef=None, suggestedRef=None)
+            active = expected['active']
+            current = next((row for row in rows if str(row['number']) == active), None)
+            if current is None or slot_identity(data, active) != expected['live']:
+                # Someone outside cswap changed the live login (or none exists).
+                return {**result, 'reason': 'live_selection_drift'}
+            if apply and self.journal.blocking():
+                # A possibly-applied commit must be resolved by a person first.
+                return {**result, 'selectedRef': current['accountRef'], 'reason': 'unresolved_receipt'}
+            result.update(choose_suggestion(rows, current['accountRef'], model, self.clock(),
+                                            last_switch_at=self._last_switch_at(data)))
+            result['automaticRotation'] = False
+            if not apply or result['suggestedRef'] is None:
+                return result
+            refusal = ('turn_already_switched' if self.journal.turn_used(turn_id)
+                       else 'auto_disabled' if not self._auto_enabled()
+                       else 'owner_required' if not owner else None)
+            if refusal:
+                return {**result, 'reason': refusal}
+            try:
+                lease = self.leases.acquire(owner)
+            except ValueError as error:
+                if str(error) == 'owner_invalid':
+                    raise
+                return {**result, 'reason': 'ownership_state_invalid'}
+            if lease is None:
+                return {**result, 'reason': 'rotation_owned_elsewhere'}
+            return self._commit(result, data, expected, current, owner, lease, turn_id, model)
+        finally:
+            lock.release()
+
+    def _commit(self, result, data, expected, current, owner, lease, turn_id, model):
+        target_ref = result['suggestedRef']
+        target = next(row for row in result['accounts'] if row['accountRef'] == target_ref)
+        to_slot = str(target['number'])
+        with FileLock(self.state_lock):
+            account = self._load()['accounts'][target_ref]
+        target_digest = account['digest']
+        intent = self.journal.begin({
+            'intentId': str(uuid.uuid4()), 'fromRef': current['accountRef'], 'toRef': target_ref,
+            'fromSlot': expected['active'], 'toSlot': to_slot, 'fromIdentity': expected['live'],
+            'toIdentity': slot_identity(data, to_slot), 'expectedRevision': expected['revision'],
+            'toGeneration': account['generation'], 'owner': owner, 'epoch': lease['epoch'],
+            'turnId': turn_id, 'model': model,
+        })
+
+        def guard(now_data, now_live):
+            # Runs under the switch locks immediately before the first write.
+            if not self.leases.check(owner, lease['epoch']):
+                raise SelectionConflict('lease_lost')
+            seen = fingerprint(now_data, now_live)
+            if (seen['revision'], seen['projection']) != (expected['revision'], expected['projection']):
+                raise SelectionConflict('selection_changed')
+            if seen['live'] != expected['live']:
+                raise SelectionConflict('live_selection_drift')
+            identity = slot_identity(now_data, to_slot)
+            if identity != intent['toIdentity']:
+                raise SelectionConflict('candidate_changed')
+            secret = self.switcher._read_account_credentials(to_slot, identity[0])
+            if credential_digest(secret) != target_digest:
+                raise SelectionConflict('candidate_changed')
+
+        try:
+            with writing_as(ENHANCED_WRITER, intent['intentId']):
+                self.switcher.switch_to(to_slot, json_output=True, guard=guard)
+        except SelectionConflict as conflict:
+            receipt = self.journal.finish(intent, 'rejected', reason=conflict.reason, finishedAtEpoch=self.clock())
+        except Exception as error:  # noqa: BLE001 — every failure is classified, never trusted
+            now_data, now_live = self._selection()
+            status, reason = classify_commit(intent, now_data, now_live)
+            if isinstance(error, SwitchError) and 'rollback also failed' in str(error):
+                status, reason = 'unresolved', 'rollback_failed'
+            receipt = self.journal.finish(intent, status, reason=reason, finishedAtEpoch=self.clock())
+        else:
+            now_data, now_live = self._selection()
+            status, reason = classify_commit(intent, now_data, now_live)
+            receipt = self.journal.finish(intent, status, reason=reason, finishedAtEpoch=self.clock())
+        return {**result, 'applied': receipt['status'] == 'applied', 'reason': receipt['status'], 'receipt': receipt}
+
     def suggest(self, current, model):
         rows = self.status()['accounts']
         if not any(row['accountRef'] == current for row in rows):
@@ -334,6 +508,26 @@ def command(argv):
     suggest = sub.add_parser('suggest')
     suggest.add_argument('--current', required=True)
     suggest.add_argument('--model', required=True)
+    rotate = sub.add_parser('rotate')
+    rotate.add_argument('--model', required=True)
+    rotate.add_argument('--apply', action='store_true')
+    rotate.add_argument('--owner')
+    rotate.add_argument('--turn-id')
+    auto = sub.add_parser('auto')
+    auto_mode = auto.add_mutually_exclusive_group(required=True)
+    auto_mode.add_argument('--enable', action='store_true')
+    auto_mode.add_argument('--disable', action='store_true')
+    pin = sub.add_parser('pin')
+    pin.add_argument('account_ref')
+    pin_mode = pin.add_mutually_exclusive_group(required=True)
+    pin_mode.add_argument('--on', action='store_true')
+    pin_mode.add_argument('--off', action='store_true')
+    receipt = sub.add_parser('receipts')
+    receipt.add_argument('--ack')
+    lease = sub.add_parser('lease')
+    lease.add_argument('lease_action', choices=['status', 'acquire', 'release'])
+    lease.add_argument('--owner')
+    lease.add_argument('--ttl', type=float, default=600)
     args = parser.parse_args(argv)
     if args.action == 'capabilities':
         result = capabilities()
@@ -358,6 +552,27 @@ def command(argv):
             result = runtime.consent(args.account_ref, enabled=args.enable, ack_cost=args.ack_cost, expected_generation=args.generation)
         elif args.action == 'collect':
             result = runtime.collect(args.account_ref, in_use=args.in_use, offline=args.offline, expected_generation=args.generation)
-        else:
+        elif args.action == 'suggest':
             result = runtime.suggest(args.current, args.model)
+        elif args.action == 'rotate':
+            result = runtime.rotate(args.model, apply=args.apply, owner=args.owner, turn_id=args.turn_id)
+        elif args.action == 'auto':
+            result = runtime.set_auto(args.enable)
+        elif args.action == 'pin':
+            result = runtime.pin(args.account_ref, args.on)
+        elif args.action == 'receipts':
+            result = runtime.acknowledge(args.ack) if args.ack else runtime.receipts()
+        else:
+            result = _lease_command(runtime.leases, args)
     print(json.dumps(result, ensure_ascii=False))
+
+
+def _lease_command(leases, args):
+    if args.lease_action == 'status':
+        return dict(version=1, artifact=ARTIFACT, holder=leases.current())
+    if not args.owner:
+        raise ValueError('owner_required')
+    if args.lease_action == 'acquire':
+        holder = leases.acquire(args.owner, ttl=args.ttl)
+        return dict(version=1, artifact=ARTIFACT, acquired=holder is not None, holder=holder or leases.current())
+    return dict(version=1, artifact=ARTIFACT, released=leases.release(args.owner))

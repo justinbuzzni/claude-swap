@@ -12,6 +12,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from claude_swap.rotation_owner import writing_as
 from claude_swap.usage_store import UsageEntry
 
 if TYPE_CHECKING:
@@ -215,7 +216,9 @@ class SwitchTransaction:
                     if data:
                         data["activeAccountNumber"] = int(self.original_account_num)
                         data["lastUpdated"] = get_timestamp()
-                        switcher._write_json(switcher.sequence_file, data)
+                        # Never attribute the undo to the intent being rolled back.
+                        with writing_as("rollback"):
+                            switcher._write_json(switcher.sequence_file, data)
                 switcher._logger.info(f"Rolled back step: {step}")
             except Exception as e:
                 switcher._logger.error(f"Failed to rollback step {step}: {e}")

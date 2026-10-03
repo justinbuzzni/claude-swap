@@ -19,6 +19,7 @@ from textual.worker import WorkerState
 
 from claude_swap import printer
 from claude_swap.models import AccountsSnapshot
+from claude_swap.rotation_owner import run_as_writer
 from claude_swap.snapshot_source import account_identity
 from claude_swap.settings import load_settings, load_ui_settings, set_setting
 from claude_swap.switcher import ClaudeAccountSwitcher
@@ -286,13 +287,13 @@ class CswapApp(App):
     def do_switch(self, number: str) -> None:
         self._start_action(
             f"Switch to account {number}",
-            partial(self.switcher.switch_to, number, json_output=True),
+            partial(run_as_writer, 'tui', self.switcher.switch_to, number, json_output=True),
         )
 
     def action_switch_best(self) -> None:
         self._start_action(
             "Switch (best)",
-            partial(self.switcher.switch, strategy="best", json_output=True),
+            partial(run_as_writer, 'tui', self.switcher.switch, strategy="best", json_output=True),
         )
 
     def do_toggle_disabled(self, number: str) -> None:
