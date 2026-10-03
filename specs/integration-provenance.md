@@ -1,8 +1,8 @@
 # Combined token runtime artifact provenance (local, unpublished)
 
 Branch `feat/claude-token-integration`. Current artifact built from commit
-`df1a2e3` (repeated self-review round 1/7); previous `e83608a`, `86e6018`
-and `6a930c9` builds are kept below as history. This file is updated by doc-only commits, so it is never inside the
+`2fef57e` (final persisted cooldown timestamp audit); previous `df1a2e3`,
+`e83608a`, `86e6018` and `6a930c9` builds are kept below as history. This file is updated by doc-only commits, so it is never inside the
 artifacts it describes. Local custom artifact only: not published, not pinned, not a release.
 
 | Item | Value |
@@ -10,13 +10,16 @@ artifacts it describes. Local custom artifact only: not published, not pinned, n
 | Base | `6397291` organization bridge + personal generation CAS (Sol) |
 | Cherry-picked | `29db313`→`4bbbfc8`, `eb33624`→`79aed16`, `f51bd28`→`8df9a61` (rotation ownership, guarded commit) |
 | Integration | `6a930c9` secret-free personal probe budget, combined smoke, contract corrections |
+| Final timestamp audit | `2fef57e` fail-closed receipt and roster cooldown timestamp validation |
 | Review round 1/7 | `df1a2e3` recovered-receipt cooldown (including historical receipts), HTTP framing failure mapping |
 | Fresh review fixes | `e83608a` consumed-token backoff, durable budget validation, fail-closed lease/journal state |
 | Audit fixes | `86e6018` profile-OAuth classification, org completion-time deadline, elapsed retryAt |
 | Artifact marker | `saycode-setup-token-runtime-v1` (upstream base `0.27.0b1`) |
 | Toolchain | uv 0.10.2, Python 3.14.5, `uv build --out-dir dist` from the clean committed tree |
-| Wheel (`df1a2e3`, current) | `claude_swap-0.27.0b1-py3-none-any.whl` sha256 `13c50d077998b60d3bbf4b325d3450de911b2515a3d9bec7c0b31c3fc32bce8a` |
-| sdist (`df1a2e3`, current) | `claude_swap-0.27.0b1.tar.gz` sha256 `f82ea133e18939f5563cd2c976df8db5687bbcb8e70065d52ac2985111691e28` |
+| Wheel (`2fef57e`, current) | `claude_swap-0.27.0b1-py3-none-any.whl` sha256 `87501a7d4df6e59f2734170204cfceca5cfe66f15b5f8bc39ea201d10d97bfea` |
+| sdist (`2fef57e`, current) | `claude_swap-0.27.0b1.tar.gz` sha256 `6e90467b6fa9491271532d824f22aef93d8ee4a40f1f531e85b54a203312abac` |
+| Wheel (`df1a2e3`, superseded) | `claude_swap-0.27.0b1-py3-none-any.whl` sha256 `13c50d077998b60d3bbf4b325d3450de911b2515a3d9bec7c0b31c3fc32bce8a` |
+| sdist (`df1a2e3`, superseded) | `claude_swap-0.27.0b1.tar.gz` sha256 `f82ea133e18939f5563cd2c976df8db5687bbcb8e70065d52ac2985111691e28` |
 | Wheel (`e83608a`, superseded) | `claude_swap-0.27.0b1-py3-none-any.whl` sha256 `4591ce89e07fe647e7801b9a9c23a3542dbe7acface8d2ad240ec54a9f2ed12e` |
 | sdist (`e83608a`, superseded) | `claude_swap-0.27.0b1.tar.gz` sha256 `c33d5a407dbe8142c46a78087c69e53896ab1ab4a80784c326fcf5f8ce66baa7` |
 | Wheel (`86e6018`, superseded) | `claude_swap-0.27.0b1-py3-none-any.whl` sha256 `26fd90da40b8b1bcbfd945e8bb7f7043c3494d6c88502efc1cf42991d2aee9a6` |
@@ -24,12 +27,12 @@ artifacts it describes. Local custom artifact only: not published, not pinned, n
 | Wheel (`6a930c9`, superseded) | sha256 `b6c125f1bdbb9405bf877f8353e707937699851859e2a7960126200c1feddae4` |
 | sdist (`6a930c9`, superseded) | sha256 `f2bbd669f5a2d1b0ece32614925e5cddf429214c9c1cdb32501b02096f22a384` |
 
-Installed-wheel modules compared byte-for-byte with `git show df1a2e3:src/claude_swap/<m>` (sha256):
+Installed-wheel modules compared byte-for-byte with `git show 2fef57e:src/claude_swap/<m>` (sha256):
 
 | Module | sha256 |
 |---|---|
-| token_runtime.py | `c1c942be19eca9a8a3c2ec2d82178addc6183acddbb6a356aca65738b448f352` |
-| rotation_owner.py | `0429b118ee66f68cb83c5793b339adadc58cd33f9fe732522acc1d042a1f8c4b` |
+| token_runtime.py | `b9dc9905764162ad2207b0c4e7dba09a7098ef7e072df3d6d594b279e586da03` |
+| rotation_owner.py | `1cd320ef2deaa28d6d5c1d8c78e58e8ef2faf687d60640eb13b94dadd7bb489e` |
 | org_probe.py | `19ddc135db28f8a94cf71f15946e5a4ef4af4664605a4fb039a28c62062a0b04` |
 | token_probe.py | `13877bec995c195e8e583890d62ddf7102e5501887ad07f7340da4c6856a839a` |
 | switcher.py | `b87af4ba3ec5187c93f62f170b3bb7c9e84a7db7e42f0130ed2228853b050f41` |
@@ -37,6 +40,30 @@ Installed-wheel modules compared byte-for-byte with `git show df1a2e3:src/claude
 
 Hashes are environment-specific build outputs; a rebuild elsewhere may differ in
 archive metadata while module contents match the commit.
+
+## Validation at `2fef57e` (final timestamp audit)
+
+- New medium finding: corrupt receipt finishedAtEpoch/historical finishedAt and
+  roster lastActiveChangeAt could bypass or indefinitely block cooldown. NaN
+  roster time led to actual synthetic apply despite a 10-second-old valid
+  applied receipt. Sixteen invalid cases failed before correction; historical
+  absent roster field positive compatibility passed. Both sources now fail
+  closed without rewriting; missing-epoch v1 receipts still use validated ISO.
+- Final related runtime/ownership/contention/autoswitch suites: 369 passed.
+  Changed-file E9/F ruff and git diff --check clean. Full suite not run.
+- Built clean 2fef57e source, isolated --no-deps reinstall only into
+  dist/pack-smoke/install, existing offline installed-wheel smoke passed.
+  All six installed modules above match committed source byte-for-byte.
+- This final artifact changes only cooldown policy/storage validation from the
+  df1a2e3 artifact. Parent reported 19 Happy binding/collector artifact tests
+  passed on df1a2e3; those unrelated cross-smokes were not rerun for this narrow
+  correction. The current isolated smoke covers runtime status/rotation.
+- Current finding locations: rotation_owner.py:262 receipt timestamp validation,
+  token_runtime.py:424 roster timestamp validation, token_runtime.py:431 historical
+  cooldown fallback, rotation_owner.py:303 receipt epoch default, token_probe.py:127
+  truncated HTTP framing mapping.
+- No operating install/daemon, live credentials/Keychain/inference/profile,
+  push, merge or deployment; automaticRotation/externalWriterExclusion stay false.
 
 ## Validation at `df1a2e3` (round 1/7)
 
