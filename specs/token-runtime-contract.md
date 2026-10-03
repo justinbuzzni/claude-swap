@@ -307,4 +307,19 @@ authority remains the server permit (`accountRemaining`/`companyRemaining`); the
 local bucket is an additional bound only. Consumers whitelist unknown fields
 (Happy `parseTokenRuntimeStatus` ignores them until it opts in).
 
+Audit fixes (2026-10-04):
+- Classification: a row is `setup_token` only from explicit roster metadata
+  (`credentialType:setup_token`, set by add-token and managed import) or an
+  inference-only credential (`select_source == inference_probe`). Normal profile
+  OAuth (`user:profile` scope) keeps `credentialType:oauth` and its legacy usage
+  path even though its access token also starts with `sk-ant-oat01-`; the runtime
+  no longer invalidates its usage cache on refresh.
+- Organization bridge timing: completion time is captured immediately after the
+  single HTTP request. The result is kept when completion <= `transportDeadline`
+  and bookkeeping finishes before `expiresAt` (processing/publish grace); it is
+  discarded otherwise. `observedAt` is the captured completion time (ms).
+- Organization `retryAt`: Retry-After is second-precision from request start; a
+  value already elapsed at completion (e.g. `Retry-After: 0`) is returned as
+  null. The durable per-token backoff still includes it (never shortened).
+
 Validation and artifact provenance: `specs/integration-provenance.md`.

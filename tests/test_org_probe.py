@@ -107,3 +107,61 @@ def test_cli_grant_only_stdin_and_bounded(monkeypatch):
     import io
     monkeypatch.setattr('sys.stdin',io.StringIO('x'*8193))
     with pytest.raises(ValueError,match='grant_invalid'):command(['collect-org'])
+
+
+def _ms_iso(seconds):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(seconds, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+
+
+def _slow_persistence(runtime, after_probe_now):
+    """Advance the clock while the post-transport state write runs."""
+    real, calls = runtime._save, []
+
+    def save(state):
+        calls.append(1)
+        if len(calls) == 2:  # 1st = reservation before POST, 2nd = result bookkeeping
+            runtime.clock = lambda: after_probe_now
+        return real(state)
+    return patch.object(runtime, '_save', side_effect=save)
+
+
+def test_completion_before_deadline_survives_slow_persistence_with_completion_time(setup):
+    runtime, request = setup
+
+    def completes(*args, **kwargs):
+        runtime.clock = lambda: NOW + 9.5
+        return observation()
+    with patch('claude_swap.org_probe.probe', side_effect=completes), _slow_persistence(runtime, NOW + 12):
+        result = collect_org(runtime, request)
+    assert result['observation']['observedAt'] == _ms_iso(NOW + 9.5)
+
+
+def test_processing_past_expiry_is_discarded(setup):
+    runtime, request = setup
+
+    def completes(*args, **kwargs):
+        runtime.clock = lambda: NOW + 9.5
+        return observation()
+    with patch('claude_swap.org_probe.probe', side_effect=completes), _slow_persistence(runtime, NOW + 31):
+        assert collect_org(runtime, request)['reason'] == 'permit_expired'
+
+
+def test_elapsed_retry_after_is_null_but_durable_backoff_retained(setup):
+    runtime, request = setup
+    throttled = dict(observation(), reason='throttled', retryAt=iso(NOW))  # Retry-After: 0 at request start
+
+    def completes(*args, **kwargs):
+        runtime.clock = lambda: NOW + 0.6
+        return throttled
+    with patch('claude_swap.org_probe.probe', side_effect=completes):
+        result = collect_org(runtime, request)
+    assert result['observation']['retryAt'] is None
+    tokens = json.loads(runtime.state_file.read_text())['tokens']
+    assert all(entry['nextAt'] >= NOW + 600 for entry in tokens.values())
+
+
+def test_future_retry_after_is_kept(setup):
+    runtime, request = setup
+    with patch('claude_swap.org_probe.probe', return_value=dict(observation(), reason='throttled', retryAt=iso(NOW + 120))):
+        assert collect_org(runtime, request)['observation']['retryAt'] == iso(NOW + 120)

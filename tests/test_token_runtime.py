@@ -323,3 +323,25 @@ def test_status_exposes_secret_free_durable_personal_budget_for_scheduler(runtim
     exposed = json.dumps(status)
     assert all(digest not in exposed for digest in state['tokens'])
     assert 'fixture-one' not in exposed
+
+
+def test_profile_oauth_with_oat_prefix_stays_normal_oauth_and_keeps_usage(runtime):
+    switcher = runtime.switcher
+    data = switcher._get_sequence_data()
+    data['accounts']['2'] = {'email': 'person@example.com', 'organizationUuid': 'org-1', 'uuid': 'u-1'}
+    data['sequence'].append(2)
+    switcher._write_json(switcher.sequence_file, data)
+
+    def login(access):
+        switcher._write_account_credentials('2', 'person@example.com', json.dumps({'claudeAiOauth': {
+            'accessToken': access, 'refreshToken': 'sk-ant-ort01-profile', 'expiresAt': 9999999999999,
+            'scopes': ['user:inference', 'user:profile']}}))
+    login('sk-ant-oat01-profile-first')
+    runtime.status()
+    login('sk-ant-oat01-profile-refreshed')  # ordinary OAuth refresh (its own write path owns that cache)
+    with patch.object(switcher._usage_store, 'invalidate_credentials') as invalidate:
+        rows = {row['number']: row for row in runtime.status()['accounts']}
+    assert rows[2]['credentialType'] == 'oauth'
+    assert rows[2]['usageStatus'] == 'unavailable' and rows[2]['reasonCodes'][0] == 'legacy_source'
+    assert rows[1]['credentialType'] == 'setup_token'
+    assert all('2' not in call.args[0] for call in invalidate.call_args_list)

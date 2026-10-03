@@ -80,21 +80,31 @@ def collect_org(runtime, request):
         if remaining <= 0:
             return stopped('permit_expired')
         obs = probe(token, now=now, timeout_s=min(10, remaining))
+        # Judge the transport by when it completed, not by how long bookkeeping took.
+        completed = runtime.clock()
+        retry_at = _timestamp(obs.get('retryAt'))
         with FileLock(runtime.state_lock):
             state = runtime._load()
             runtime._sync(state)
             account = state['accounts'].get(ref)
             token_state = state['tokens'].get(digest, {})
             failures = token_state.get('failures', 0) + 1 if obs['reason'] != 'coverage_unknown' else 0
-            token_state.update(failures=failures, nextAt=max(runtime.clock()+min(86400, 300*2**min(failures, 6)), _timestamp(obs.get('retryAt')) or 0))
+            token_state.update(failures=failures, nextAt=max(completed+min(86400, 300*2**min(failures, 6)), retry_at or 0))
             state['tokens'][digest] = token_state
             runtime._save(state)
             if account is None or snapshot != (account['digest'], account['generation'], account['scope']) or account['disabled']:
                 return stopped('credential_changed')
-            if runtime.clock()*1000 > permit['transportDeadline']:
+            if completed*1000 > permit['transportDeadline']:
                 return stopped('permit_expired')
+            # Processing/publish grace ends with the permit itself.
+            if runtime.clock()*1000 > permit['expiresAt']:
+                return stopped('permit_expired')
+            if retry_at is not None and retry_at <= completed:
+                # Second-precision Retry-After from request start (e.g. 0) has already
+                # elapsed; the durable backoff above still holds the next attempt.
+                obs['retryAt'] = None
             obs.update(accountRef=ref, credentialGeneration=account['generation'],
-                       observedAt=datetime.fromtimestamp(runtime.clock(), timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))
+                       observedAt=datetime.fromtimestamp(completed, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))
             return dict(version=1, artifact=ARTIFACT, observation=obs, applied=False)
     finally:
         lock.release()

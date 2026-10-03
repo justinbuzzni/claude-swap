@@ -185,16 +185,19 @@ class TokenRuntime:
                 managed_gen = record.get('credentialGeneration', 1)
                 if isinstance(managed_gen, bool) or not isinstance(managed_gen, int) or managed_gen < 1:
                     raise ValueError('credential_generation_invalid')
+                source = select_source(secret)
+                # Classify from explicit metadata or an inference-only credential.
+                # Normal profile OAuth access tokens share the sk-ant-oat01- prefix
+                # and must keep their legacy usage path and cache.
+                is_setup = record.get('credentialType') == 'setup_token' or source == 'inference_probe'
                 if old is None or old['digest'] != digest or old['scope'] != scope or old.get('managedGeneration') != managed_gen:
                     generation = managed_gen if record.get('managedAccountId') else max(managed_gen, (old['generation'] + 1) if old else 1)
                     old = {'digest': digest, 'scope': scope, 'generation': generation,
                            'managedGeneration': managed_gen, 'consent': False, 'authState': 'expiry-unknown',
                            'consentRevision': (old.get('consentRevision', 0) + 1) if old else 0}
                     state['accounts'][ref] = old
-                    if isinstance(token, str) and token.startswith('sk-ant-oat01-'):
+                    if is_setup:
                         self.switcher._usage_store.invalidate_credentials([slot], {slot:(record['email'], scope[0])})
-                source = select_source(secret)
-                is_setup = isinstance(token, str) and token.startswith('sk-ant-oat01-')
                 label = record.get('alias') or record.get('displayName') or record.get('email') or 'Unresolved'
                 confidence = 'user-labeled' if record.get('alias') or record.get('displayName') else ('unresolved' if record.get('email', '').endswith('@token.local') else 'saved-metadata')
                 old.update(slot=slot, roster={'email':record['email'], 'organizationUuid':record.get('organizationUuid') or '', 'uuid':record.get('uuid') or ''}, label=label, identityConfidence=confidence,
