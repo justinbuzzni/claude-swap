@@ -420,7 +420,12 @@ class TokenRuntime:
         return self.journal.finish(pending, status, reason=reason, recovered=True)
 
     def _last_switch_at(self, data):
-        moments = [data.get('lastActiveChangeAt')]
+        moments = []
+        if 'lastActiveChangeAt' in data:
+            active_at = data['lastActiveChangeAt']
+            if type(active_at) not in (int, float) or not math.isfinite(active_at) or active_at < 0:
+                raise ValueError('selection_time_invalid')
+            moments.append(active_at)
         # COMPAT: recovered receipts before this fix lack epoch time. Reconsider
         # after those persisted v1 receipts age out; never rewrite the journal here.
         moments += [r.get('finishedAtEpoch', _timestamp(r.get('finishedAt')))

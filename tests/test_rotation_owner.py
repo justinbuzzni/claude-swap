@@ -547,3 +547,52 @@ def test_historical_recovered_receipt_without_epoch_keeps_cooldown(pool):
          'acknowledged': True, 'finishedAt': iso(pool.clock())}]}))
     assert pool.rotate(MODEL, apply=True, owner='desk-1')['reason'] == 'cooldown'
     assert live_email(pool) == 'one@token.local'
+
+
+@pytest.mark.parametrize('status', ['applied', 'unresolved'])
+@pytest.mark.parametrize('timestamp', [float('nan'), float('inf'), True, -1])
+def test_corrupt_receipt_epoch_blocks_rotation_without_rewriting(pool, status, timestamp):
+    armed(pool)
+    pool.journal.path.write_text(json.dumps({'version': 1, 'pending': None, 'receipts': [
+        {'intentId': 'bad-clock', 'status': status, 'acknowledged': True,
+         'finishedAt': iso(pool.clock()), 'finishedAtEpoch': timestamp}]}))
+    before = pool.journal.path.read_text()
+    with pytest.raises(ValueError, match='rotation-journal.v1.json_invalid'):
+        pool.rotate(MODEL, apply=True, owner='desk-1')
+    assert pool.journal.path.read_text() == before
+    assert live_email(pool) == 'one@token.local'
+
+
+@pytest.mark.parametrize('finished', [None, 'invalid', '2033-05-18T03:33:20'])
+def test_historical_receipt_invalid_iso_blocks_rotation(pool, finished):
+    armed(pool)
+    pool.journal.path.write_text(json.dumps({'version': 1, 'pending': None, 'receipts': [
+        {'intentId': 'bad-historical-clock', 'status': 'unresolved', 'acknowledged': True,
+         'finishedAt': finished}]}))
+    with pytest.raises(ValueError, match='rotation-journal.v1.json_invalid'):
+        pool.rotate(MODEL, apply=True, owner='desk-1')
+    assert live_email(pool) == 'one@token.local'
+
+
+@pytest.mark.parametrize('timestamp', [float('nan'), float('inf'), True, -1, None])
+def test_corrupt_roster_cooldown_time_blocks_rotation_with_recent_receipt(pool, timestamp):
+    armed(pool)
+    pool.journal.finish({'intentId': 'recent-switch'}, 'applied', finishedAtEpoch=pool.clock() - 10)
+    data = seq(pool)
+    data['lastActiveChangeAt'] = timestamp
+    pool.switcher.sequence_file.write_text(json.dumps(data))
+    before = pool.switcher.sequence_file.read_text()
+    with pytest.raises(ValueError, match='selection_time_invalid'):
+        pool.rotate(MODEL, apply=True, owner='desk-1')
+    assert pool.switcher.sequence_file.read_text() == before
+    assert live_email(pool) == 'one@token.local'
+
+
+def test_historical_roster_without_active_change_time_keeps_receipt_cooldown(pool):
+    armed(pool)
+    pool.journal.finish({'intentId': 'recent-switch'}, 'applied', finishedAtEpoch=pool.clock() - 10)
+    data = seq(pool)
+    data.pop('lastActiveChangeAt', None)
+    pool.switcher.sequence_file.write_text(json.dumps(data))
+    assert pool.rotate(MODEL, apply=True, owner='desk-1')['reason'] == 'cooldown'
+    assert live_email(pool) == 'one@token.local'

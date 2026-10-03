@@ -259,6 +259,21 @@ class RotationJournal:
                         and receipt.get('status') in ('applied', 'rejected', 'failed', 'unresolved')
                         and type(receipt.get('acknowledged')) is bool
                         for receipt in receipts)
+        if valid:
+            for receipt in receipts:
+                if 'finishedAtEpoch' in receipt:
+                    finished = receipt['finishedAtEpoch']
+                    valid = type(finished) in (int, float) and math.isfinite(finished) and finished >= 0
+                else:
+                    # COMPAT: original recovered v1 receipts have only ISO time.
+                    # Reconsider after those receipts age out; never repair on read.
+                    try:
+                        finished = datetime.fromisoformat(receipt['finishedAt'].replace('Z', '+00:00'))
+                        valid = finished.tzinfo is not None and math.isfinite(finished.timestamp()) and finished.timestamp() >= 0
+                    except (KeyError, TypeError, ValueError, AttributeError, OverflowError, OSError):
+                        valid = False
+                if not valid:
+                    break
         if not valid:
             raise ValueError(f'{self.path.name}_invalid')
         return state

@@ -374,3 +374,24 @@ All four new regression cases failed before fixes. Final targeted command:
  tests/test_rotation_contention.py tests/test_autoswitch.py` → 395 passed.
 Changed-file E9/F ruff and git diff --check passed. No full suite, live credentials,
 Keychain/inference/profile, operating daemon/install, push, merge or deployment.
+
+
+### Final cooldown timestamp audit (2026-10-04)
+
+A separate medium-severity persisted-state defect affected both cooldown sources:
+nonfinite receipt finishedAtEpoch or roster lastActiveChangeAt could bypass a
+recent cooldown (NaN) or block indefinitely (infinity). NaN in the first roster
+moment reproduced actual synthetic apply despite a valid applied receipt from
+10 seconds earlier. Receipt epoch now requires a finite nonnegative number,
+excluding boolean values; an absent epoch keeps historical v1 compatibility via
+valid timezone-aware finishedAt ISO. A present roster lastActiveChangeAt requires
+a finite nonnegative number; absent historical fields remain valid. Invalid
+state rejects without rewriting either persisted source. This is distinct from
+the earlier omission of recovered receipt timestamps, and remains synthetic
+rotation coverage while automaticRotation stays false.
+
+Sixteen invalid-state regressions failed before fixes; the missing historical
+roster field compatibility test already passed. Final related runtime/ownership/
+two-process-contention/autoswitch suites: 369 passed. Changed-file E9/F ruff and
+git diff --check passed. No full suite, live credentials, Keychain/inference,
+operating install/daemon, push, merge or deployment.
