@@ -1,6 +1,7 @@
 """Conservative inference header observation; no live-provider claims."""
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import time
@@ -123,7 +124,7 @@ def probe(token: str, *, now: float | None = None, timeout_s: float = 10) -> dic
     except urllib.error.HTTPError as error:
         status, headers = error.code, error.headers or {}
         error.close()
-    except (TimeoutError, urllib.error.URLError, OSError):
+    except (TimeoutError, urllib.error.URLError, OSError, http.client.HTTPException):
         result['reason'] = 'transport_failed'
         return result
     if status in (200, 429):

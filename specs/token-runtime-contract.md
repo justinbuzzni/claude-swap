@@ -350,3 +350,27 @@ validation: 1132 passed; unchanged token transport parser coverage also passed.
 Changed-file E9/F ruff and git diff --check passed. No live credentials, Keychain,
 inference, operating daemon, push, merge or deployment. Capabilities remain
 `automaticRotation:false` and `externalWriterExclusion:false`.
+
+
+### Repeated self-review round 1/7 (2026-10-04)
+
+Two additional medium-severity defects were reproduced and fixed. Crash recovery
+previously wrote applied/unresolved receipts without finishedAtEpoch, which made
+the cooldown ignore an acknowledged unresolved commit when no recent roster
+active-change timestamp existed. All newly finished receipts now include epoch
+time; historical recovered receipts use their existing finishedAt ISO value for
+cooldown without rewriting the journal. Synthetic policy fixtures reproduced
+actual immediate apply before both the new-receipt and historical-receipt fixes.
+Production coverage remains unknown and automaticRotation remains false.
+
+Truncated HTTP framing (http.client.IncompleteRead) previously escaped both
+bounded body readers instead of yielding the existing transport_failed result.
+HTTPException is now mapped to that result, keeping auth unverified, utilization
+unknown and provider partial body content out of the returned observation.
+
+All four new regression cases failed before fixes. Final targeted command:
+`UV_CACHE_DIR=.uv-cache uv run --frozen pytest -n 0 tests/test_token_probe.py
+ tests/test_token_runtime.py tests/test_org_probe.py tests/test_rotation_owner.py
+ tests/test_rotation_contention.py tests/test_autoswitch.py` → 395 passed.
+Changed-file E9/F ruff and git diff --check passed. No full suite, live credentials,
+Keychain/inference/profile, operating daemon/install, push, merge or deployment.

@@ -285,6 +285,7 @@ class RotationJournal:
                 state['pending'] = None
             receipt = {key: intent.get(key) for key in ('intentId', 'fromRef', 'toRef', 'fromSlot', 'toSlot',
                                                         'expectedRevision', 'toGeneration', 'owner', 'epoch', 'turnId')}
+            fields.setdefault('finishedAtEpoch', self.clock())
             receipt.update(status=status, finishedAt=_iso(self.clock()), acknowledged=False, **fields)
             state['receipts'] = ([r for r in state.get('receipts', []) if r.get('intentId') != intent['intentId']]
                                  + [receipt])[-MAX_RECEIPTS:]

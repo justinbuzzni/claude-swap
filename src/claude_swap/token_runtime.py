@@ -421,7 +421,10 @@ class TokenRuntime:
 
     def _last_switch_at(self, data):
         moments = [data.get('lastActiveChangeAt')]
-        moments += [r.get('finishedAtEpoch') for r in self.journal.receipts() if r.get('status') in ('applied', 'unresolved')]
+        # COMPAT: recovered receipts before this fix lack epoch time. Reconsider
+        # after those persisted v1 receipts age out; never rewrite the journal here.
+        moments += [r.get('finishedAtEpoch', _timestamp(r.get('finishedAt')))
+                    for r in self.journal.receipts() if r.get('status') in ('applied', 'unresolved')]
         moments = [m for m in moments if isinstance(m, (int, float)) and not isinstance(m, bool)]
         return max(moments) if moments else None
 

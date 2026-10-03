@@ -111,3 +111,27 @@ def test_stream_read_deadline_size_and_no_fallback(monkeypatch):
     monkeypatch.setattr(urllib.request,'build_opener',lambda *args: Opener())
     assert probe('fixture-token',now=1000)['reason'] == 'response_too_large'
     assert sum(calls) == 65537
+
+
+@pytest.mark.parametrize('reader', ['read', 'read1'])
+def test_truncated_http_response_is_transport_failure(monkeypatch, reader):
+    from http.client import IncompleteRead
+
+    class Truncated(Response):
+        pass
+
+    def truncated(self, size):
+        raise IncompleteRead(b'provider-body-not-retained', 100)
+
+    setattr(Truncated, reader, truncated)
+
+    class Opener:
+        def open(self, *args, **kwargs):
+            return Truncated()
+
+    monkeypatch.setattr(urllib.request, 'build_opener', lambda *args: Opener())
+    result = probe('fixture-token', now=1000)
+    assert result['reason'] == 'transport_failed'
+    assert result['authState'] == 'unverified'
+    assert all(window['pct'] is None for window in result['windows'])
+    assert 'provider-body' not in str(result)

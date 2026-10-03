@@ -520,3 +520,30 @@ def test_corrupt_journal_blocks_controller_without_rewriting(pool, state):
         pool.rotate(MODEL, apply=True, owner='desk-1')
     assert pool.journal.path.read_text() == before
     assert live_email(pool) == 'one@token.local'
+
+
+def test_recovered_unresolved_receipt_starts_cooldown_after_ack(pool):
+    armed(pool)
+    data = seq(pool)
+    # Crash recovery cannot prove this intent did not commit: the expected
+    # revision differs, but there is no recent active-change timestamp.
+    pool.journal.begin({'intentId': 'uncertain-crash',
+                        'expectedRevision': data['selectionRevision'] + 1,
+                        'fromSlot': '1', 'toSlot': '2',
+                        'fromIdentity': ['one@token.local', ''],
+                        'toIdentity': ['two@token.local', ''], 'turnId': None})
+    assert pool.rotate(MODEL, apply=True, owner='desk-1')['reason'] == 'unresolved_receipt'
+    receipt = pool.journal.receipt('uncertain-crash')
+    assert receipt['status'] == 'unresolved' and receipt['recovered'] is True
+    pool.acknowledge(receipt['intentId'])
+    assert pool.rotate(MODEL, apply=True, owner='desk-1')['reason'] == 'cooldown'
+    assert live_email(pool) == 'one@token.local'
+
+
+def test_historical_recovered_receipt_without_epoch_keeps_cooldown(pool):
+    armed(pool)
+    pool.journal.path.write_text(json.dumps({'version': 1, 'pending': None, 'receipts': [
+        {'intentId': 'historical-crash', 'status': 'unresolved', 'recovered': True,
+         'acknowledged': True, 'finishedAt': iso(pool.clock())}]}))
+    assert pool.rotate(MODEL, apply=True, owner='desk-1')['reason'] == 'cooldown'
+    assert live_email(pool) == 'one@token.local'
