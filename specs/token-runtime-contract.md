@@ -176,3 +176,10 @@ lock-preserving installed-wheel reinstall and `tests/pack_token_runtime.py` pass
 including actual wheel file-backend managed import/replacement/export and organization
 fake-HTTP/replay. Repeatable fixtures use a new synthetic token per generation so
 retained token cooldown is never reset to make the test pass. No live traffic.
+
+Personal Core CAS: capability `personalProbeVersion:1`; consent/collect accept optional
+`--generation N`. Under the runtime state/roster check, a differing generation
+rejects before consent mutation or budget/transport. Legacy callers omitting it
+keep prior behavior. Happy requires this capability and always supplies generation.
+Personal generation CAS validation: 67 passed across token_runtime/org_probe/token_probe,
+selected E9/F lint passed, rebuilt wheel/sdist and isolated installed-wheel smoke passed.

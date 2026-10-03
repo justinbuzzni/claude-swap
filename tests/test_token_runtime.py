@@ -288,3 +288,15 @@ def test_replacement_does_not_reset_machine_or_old_digest_spending(runtime):
     with patch('claude_swap.token_runtime.probe', return_value=observation()): runtime.collect(ref,in_use=True)
     assert runtime.status()['budget']['machineUsed24h'] == 2
     assert len({a['digest'] for a in json.loads(runtime.state_file.read_text())['attempts']}) == 2
+
+
+def test_personal_generation_cas_rejects_before_consent_and_transport(runtime):
+    row = first(runtime)
+    with pytest.raises(ValueError, match='credential_changed'):
+        runtime.consent(row['accountRef'], enabled=True, ack_cost=True, expected_generation=2)
+    assert first(runtime)['probeEnabled'] is False
+    ref = enable(runtime)
+    with patch('claude_swap.token_runtime.probe') as http:
+        assert runtime.collect(ref, in_use=True, expected_generation=2)['reason'] == 'credential_changed'
+        http.assert_not_called()
+    assert runtime.status()['budget']['machineUsed24h'] == 0

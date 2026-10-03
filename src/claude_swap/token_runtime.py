@@ -22,7 +22,7 @@ ARTIFACT = 'saycode-setup-token-runtime-v1'
 
 def capabilities():
     return dict(version=1, artifact=ARTIFACT, setupTokenObservation=True,
-                managedAccountMetadata=True, durableProbeBudget=True, organizationCollectorVersion=1,
+                managedAccountMetadata=True, durableProbeBudget=True, organizationCollectorVersion=1, personalProbeVersion=1,
                 rotationSuggestion=True, automaticRotation=False,
                 rotationWriterOwnership=False)
 
@@ -213,13 +213,15 @@ class TokenRuntime:
             return dict(version=1, artifact=ARTIFACT, accounts=[self._row(ref, a) for ref, a in sorted(state['accounts'].items(), key=lambda pair: int(pair[1]['slot']))],
                         budget={'machineUsed24h':len(state['attempts']), 'machineLimit24h':288, 'accountLimit24h':96})
 
-    def consent(self, ref, *, enabled, ack_cost=False):
+    def consent(self, ref, *, enabled, ack_cost=False, expected_generation=None):
         with FileLock(self.state_lock):
             state = self._load()
             self._sync(state)
             account = state['accounts'].get(ref)
             if account is None:
                 raise ValueError('account_not_found')
+            if expected_generation is not None and account['generation'] != expected_generation:
+                raise ValueError('credential_changed')
             if enabled:
                 if account['scope'][1] or account['scope'][0]:
                     raise ValueError('organization_collector_required')
@@ -232,7 +234,7 @@ class TokenRuntime:
             self._save(state)
             return dict(version=1, artifact=ARTIFACT, accountRef=ref, probeEnabled=enabled)
 
-    def collect(self, ref, *, in_use=False, offline=False):
+    def collect(self, ref, *, in_use=False, offline=False, expected_generation=None):
         def stopped(reason):
             return dict(version=1, artifact=ARTIFACT, accountRef=ref, reason=reason, applied=False)
         if offline or not in_use:
@@ -247,6 +249,8 @@ class TokenRuntime:
                 account = state['accounts'].get(ref)
                 if account is None:
                     return stopped('account_not_found')
+                if expected_generation is not None and account['generation'] != expected_generation:
+                    return stopped('credential_changed')
                 if not account['consent'] or account['source'] != 'inference_probe' or any(account['scope']):
                     self._save(state)
                     return stopped('probe_disabled')
@@ -311,12 +315,14 @@ def command(argv):
     sub.add_parser('collect-org')
     consent = sub.add_parser('consent')
     consent.add_argument('account_ref')
+    consent.add_argument('--generation', type=int)
     mode = consent.add_mutually_exclusive_group(required=True)
     mode.add_argument('--enable', action='store_true')
     mode.add_argument('--disable', action='store_true')
     consent.add_argument('--ack-cost', action='store_true', help='Acknowledge actual inference, quota use and possible extra charges')
     collect = sub.add_parser('collect')
     collect.add_argument('account_ref')
+    collect.add_argument('--generation', type=int)
     collect.add_argument('--in-use', action='store_true')
     collect.add_argument('--offline', action='store_true')
     suggest = sub.add_parser('suggest')
@@ -343,9 +349,9 @@ def command(argv):
         elif args.action == 'status':
             result = runtime.status()
         elif args.action == 'consent':
-            result = runtime.consent(args.account_ref, enabled=args.enable, ack_cost=args.ack_cost)
+            result = runtime.consent(args.account_ref, enabled=args.enable, ack_cost=args.ack_cost, expected_generation=args.generation)
         elif args.action == 'collect':
-            result = runtime.collect(args.account_ref, in_use=args.in_use, offline=args.offline)
+            result = runtime.collect(args.account_ref, in_use=args.in_use, offline=args.offline, expected_generation=args.generation)
         else:
             result = runtime.suggest(args.current, args.model)
     print(json.dumps(result, ensure_ascii=False))
