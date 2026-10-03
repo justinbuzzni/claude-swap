@@ -473,3 +473,50 @@ def test_consent_revoked_by_suggestion_time_never_suggests(pool):
     pool.consent(refs(pool)[2], enabled=False)
     result = pool.rotate(MODEL, apply=True, owner='desk-1')
     assert result['suggestedRef'] is None and result['applied'] is False
+
+
+@pytest.mark.parametrize('state', [
+    {'version': 1, 'epoch': 1},
+    {'version': 1, 'epoch': 1, 'holder': {}},
+    {'version': 1, 'epoch': -1, 'holder': None},
+    {'version': 1, 'epoch': True, 'holder': None},
+    {'version': 1, 'epoch': 1, 'holder': {'owner': 'other', 'epoch': 2, 'expiresAt': NOW + 600}},
+    {'version': 1, 'epoch': 1, 'holder': {'owner': '', 'epoch': 1, 'expiresAt': NOW + 600}},
+    {'version': 1, 'epoch': 1, 'holder': {'owner': 'other', 'epoch': 1, 'expiresAt': float('nan')}},
+])
+def test_structurally_corrupt_lease_cannot_be_claimed(pool, state):
+    leases = LeaseStore(pool.switcher.backup_dir, clock=pool.clock)
+    leases.path.write_text(json.dumps(state))
+    with pytest.raises(ValueError, match='rotation-owner.v1.json_invalid'):
+        leases.acquire('desk-1')
+    with pytest.raises(SelectionConflict) as caught:
+        leases.legacy_guard()({}, None)
+    assert caught.value.reason == 'ownership_state_invalid'
+    assert json.loads(leases.path.read_text())['epoch'] == state['epoch']
+
+
+@pytest.mark.parametrize('ttl', [0, -1, float('nan'), float('inf'), True])
+def test_invalid_lease_ttl_rejected_without_writing(pool, ttl):
+    leases = LeaseStore(pool.switcher.backup_dir, clock=pool.clock)
+    with pytest.raises(ValueError, match='ttl_invalid'):
+        leases.acquire('desk-1', ttl=ttl)
+    assert not leases.path.exists()
+
+
+@pytest.mark.parametrize('state', [
+    {'version': 1, 'pending': None},
+    {'version': 1, 'receipts': []},
+    {'version': 1, 'pending': {}, 'receipts': []},
+    {'version': 1, 'pending': 'lost-intent', 'receipts': []},
+    {'version': 1, 'pending': None, 'receipts': {}},
+    {'version': 1, 'pending': None, 'receipts': [{'intentId': 'lost', 'status': 'unresolved'}]},
+    {'version': 1, 'pending': None, 'receipts': [{'intentId': 'lost', 'status': 'unresolved', 'acknowledged': 'false'}]},
+])
+def test_corrupt_journal_blocks_controller_without_rewriting(pool, state):
+    armed(pool)
+    pool.journal.path.write_text(json.dumps(state))
+    before = pool.journal.path.read_text()
+    with pytest.raises(ValueError, match='rotation-journal.v1.json_invalid'):
+        pool.rotate(MODEL, apply=True, owner='desk-1')
+    assert pool.journal.path.read_text() == before
+    assert live_email(pool) == 'one@token.local'

@@ -323,3 +323,30 @@ Audit fixes (2026-10-04):
   null. The durable per-token backoff still includes it (never shortened).
 
 Validation and artifact provenance: `specs/integration-provenance.md`.
+
+
+## Fresh provider review (2026-10-04)
+
+Personal inference outcomes now persist the consumed token's failure streak and
+Retry-After before discarding an observation whose consent/credential changed
+in flight. Another opted-in alias, including after process restart, therefore
+obeys the provider backoff without receiving the revoked account observation.
+Durable attempt timestamps/digests and token nextAt/failure values are validated
+before rolling-window pruning; boolean/nonfinite/missing spending state fails
+closed rather than being pruned or interpreted as zero. Reservation-only token
+rows may omit failures, as in the original v1 writer.
+
+Ownership records require a nonnegative integer epoch and a structurally valid,
+epoch-matching holder with finite positive expiry. Invalid/nonpositive lease TTLs
+are rejected before writing. Journal state requires pending/receipts containers,
+valid pending identity/revision and receipt intent/status/boolean acknowledgment;
+corrupt state blocks the controller without rewriting or erasing an unresolved
+receipt. Optional historical receipt fields remain optional.
+
+All 26 new regression cases failed before their corresponding fixes. Final
+focused runtime/org/ownership/two-process-contention/autoswitch validation:
+371 passed. Broader switcher/usage-store/OAuth/cache coverage before journal
+validation: 1132 passed; unchanged token transport parser coverage also passed.
+Changed-file E9/F ruff and git diff --check passed. No live credentials, Keychain,
+inference, operating daemon, push, merge or deployment. Capabilities remain
+`automaticRotation:false` and `externalWriterExclusion:false`.

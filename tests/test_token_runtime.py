@@ -345,3 +345,46 @@ def test_profile_oauth_with_oat_prefix_stays_normal_oauth_and_keeps_usage(runtim
     assert rows[2]['usageStatus'] == 'unavailable' and rows[2]['reasonCodes'][0] == 'legacy_source'
     assert rows[1]['credentialType'] == 'setup_token'
     assert all('2' not in call.args[0] for call in invalidate.call_args_list)
+
+
+def test_revoked_inflight_probe_keeps_shared_token_retry_after(runtime):
+    ref = enable(runtime)
+    runtime.switcher.add_account_from_token(token='sk-ant-oat01-fixture-one', email='two@token.local')
+    alias = runtime.status()['accounts'][1]['accountRef']
+    runtime.consent(alias, enabled=True, ack_cost=True)
+
+    def http(*args, **kwargs):
+        runtime.consent(ref, enabled=False)
+        result = observation(reason='throttled', auth='unverified')
+        result['retryAt'] = iso(2000010000)
+        return result
+
+    with patch('claude_swap.token_runtime.probe', side_effect=http):
+        assert runtime.collect(ref, in_use=True)['reason'] == 'credential_changed'
+    assert first(runtime).get('observation') is None
+    # A discarded account observation still describes the consumed token's
+    # provider backoff; another opted-in alias must obey it after restart.
+    restarted = TokenRuntime(runtime.switcher, clock=lambda: 2000002000)
+    with patch('claude_swap.token_runtime.probe', return_value=observation(now=2000002000)) as http:
+        assert restarted.collect(alias, in_use=True)['reason'] == 'backing_off'
+        http.assert_not_called()
+    assert restarted.status()['accounts'][1]['probeBudget']['failureStreak'] == 1
+
+
+@pytest.mark.parametrize('budget', [
+    {'attempts': [{'at': float('nan'), 'digest': 'consumed'}]},
+    {'attempts': [{'at': True, 'digest': 'consumed'}]},
+    {'attempts': [{'at': 2000000000, 'digest': ''}]},
+    {'tokens': {'consumed': {}}},
+    {'tokens': {'consumed': {'nextAt': float('nan')}}},
+    {'tokens': {'consumed': {'nextAt': 2000000000, 'failures': -1}}},
+])
+def test_corrupt_durable_budget_fails_closed_before_transport(runtime, budget):
+    ref = enable(runtime)
+    state = json.loads(runtime.state_file.read_text())
+    state.update(budget)
+    runtime.state_file.write_text(json.dumps(state))
+    with patch('claude_swap.token_runtime.probe', return_value=observation()) as http:
+        with pytest.raises(ValueError, match='runtime_state_invalid'):
+            runtime.collect(ref, in_use=True)
+        http.assert_not_called()

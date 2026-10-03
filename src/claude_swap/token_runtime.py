@@ -141,10 +141,21 @@ class TokenRuntime:
             return {'version': 1, 'accounts': {}, 'attempts': [], 'tokens': {}}
         try:
             state = json.loads(self.state_file.read_text())
-            if state['version'] != 1 or not isinstance(state['accounts'], dict) or not isinstance(state['attempts'], list) or not isinstance(state['tokens'], dict):
+            if type(state['version']) is not int or state['version'] != 1 or not isinstance(state['accounts'], dict) or not isinstance(state['attempts'], list) or not isinstance(state['tokens'], dict):
                 raise ValueError
+            # Invalid reservations must not age out as if no inference was
+            # spent. Validate persisted spending/backoff before any pruning.
+            for attempt in state['attempts']:
+                at, digest = attempt['at'], attempt['digest']
+                if type(at) not in (int, float) or not math.isfinite(at) or at < 0 or not isinstance(digest, str) or not digest:
+                    raise ValueError
+            for digest, token in state['tokens'].items():
+                next_at, failures = token['nextAt'], token.get('failures', 0)
+                if (not digest or type(next_at) not in (int, float) or not math.isfinite(next_at) or next_at < 0
+                        or type(failures) is not int or failures < 0):
+                    raise ValueError
             return state
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError, AttributeError):
             # Never reset a broken durable budget to zero.
             raise ValueError('runtime_state_invalid') from None
 
@@ -331,13 +342,9 @@ class TokenRuntime:
                 state = self._load()
                 self._sync(state)
                 account = state['accounts'].get(ref)
-                if account is None or snapshot != (account['digest'], account['generation'], account['scope'], account['consentRevision']) or not account['consent']:
-                    self._save(state)
-                    return stopped('credential_changed')
-                obs.update(accountRef=ref, credentialGeneration=account['generation'])
-                account['observation'] = obs
-                if obs['authState'] in ('invalid', 'usable'):
-                    account['authState'] = obs['authState']
+                # Transport consumed this token even when consent/roster changed.
+                # Persist its shared backoff before discarding the account result,
+                # so another alias cannot bypass Retry-After after a restart.
                 token_state = state['tokens'][digest]
                 failed = obs['reason'] != 'coverage_unknown'
                 failures = token_state.get('failures', 0) + 1 if failed else 0
@@ -345,6 +352,13 @@ class TokenRuntime:
                 # Jitter only lengthens the durable backoff; never below 5min.
                 delay = min(86400, 900 * 2 ** min(failures, 6)) * (1 + random.random() * .1)
                 token_state.update(nextAt=max(self.clock()+delay, retry), failures=failures)
+                if account is None or snapshot != (account['digest'], account['generation'], account['scope'], account['consentRevision']) or not account['consent']:
+                    self._save(state)
+                    return stopped('credential_changed')
+                obs.update(accountRef=ref, credentialGeneration=account['generation'])
+                account['observation'] = obs
+                if obs['authState'] in ('invalid', 'usable'):
+                    account['authState'] = obs['authState']
                 if obs['authState'] == 'usable' and any(w['pct'] is not None for w in obs['windows']):
                     account['lastGood'] = obs
                 self._save(state)

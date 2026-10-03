@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextvars
 import hashlib
 import json
+import math
 import os
 import time
 from contextlib import contextmanager
@@ -143,7 +144,7 @@ def _read(path: Path, empty: dict) -> dict:
         value = json.loads(path.read_text(encoding='utf-8'))
     except (OSError, ValueError) as error:
         raise ValueError(f'{path.name}_invalid') from error
-    if not isinstance(value, dict) or value.get('version') != 1:
+    if not isinstance(value, dict) or type(value.get('version')) is not int or value['version'] != 1:
         # Unknown ownership state is never treated as "free".
         raise ValueError(f'{path.name}_invalid')
     return value
@@ -156,7 +157,19 @@ class LeaseStore:
         self.clock = clock
 
     def _state(self) -> dict:
-        return _read(self.path, {'version': 1, 'epoch': 0, 'holder': None})
+        state = _read(self.path, {'version': 1, 'epoch': 0, 'holder': None})
+        epoch, holder = state.get('epoch'), state.get('holder')
+        valid = type(epoch) is int and epoch >= 0 and 'holder' in state
+        if holder is not None:
+            valid = valid and isinstance(holder, dict)
+            if valid:
+                expires = holder.get('expiresAt')
+                valid = (isinstance(holder.get('owner'), str) and bool(holder['owner'])
+                         and type(holder.get('epoch')) is int and holder['epoch'] == epoch and epoch > 0
+                         and type(expires) in (int, float) and math.isfinite(expires) and expires > 0)
+        if not valid:
+            raise ValueError(f'{self.path.name}_invalid')
+        return state
 
     def _live_holder(self, state: dict) -> dict | None:
         holder = state.get('holder')
@@ -170,7 +183,7 @@ class LeaseStore:
 
     def acquire(self, owner: str, *, ttl: float = 600) -> dict | None:
         """Take or renew the lease for ``owner``; None when someone else holds it."""
-        if not owner or owner == LEGACY_OWNER:
+        if not isinstance(owner, str) or not owner or owner == LEGACY_OWNER:
             raise ValueError('owner_invalid')
         return self._take(owner, ttl)
 
@@ -178,6 +191,8 @@ class LeaseStore:
         return self._take(LEGACY_OWNER, ttl) is not None
 
     def _take(self, owner: str, ttl: float) -> dict | None:
+        if type(ttl) not in (int, float) or not math.isfinite(ttl) or ttl <= 0:
+            raise ValueError('ttl_invalid')
         with FileLock(self.lock):
             state = self._state()
             holder = self._live_holder(state)
@@ -226,7 +241,27 @@ class RotationJournal:
         self.clock = clock
 
     def _state(self) -> dict:
-        return _read(self.path, {'version': 1, 'pending': None, 'receipts': []})
+        state = _read(self.path, {'version': 1, 'pending': None, 'receipts': []})
+        pending, receipts = state.get('pending'), state.get('receipts')
+        valid = 'pending' in state and isinstance(receipts, list)
+        if pending is not None:
+            valid = valid and isinstance(pending, dict)
+            if valid:
+                revision = pending.get('expectedRevision')
+                valid = (isinstance(pending.get('intentId'), str) and bool(pending['intentId'])
+                         and type(revision) is int and revision >= 0
+                         and all(isinstance(pending.get(key), list) and len(pending[key]) == 2
+                                 and all(isinstance(value, str) for value in pending[key])
+                                 for key in ('fromIdentity', 'toIdentity')))
+        if valid:
+            valid = all(isinstance(receipt, dict)
+                        and isinstance(receipt.get('intentId'), str) and bool(receipt['intentId'])
+                        and receipt.get('status') in ('applied', 'rejected', 'failed', 'unresolved')
+                        and type(receipt.get('acknowledged')) is bool
+                        for receipt in receipts)
+        if not valid:
+            raise ValueError(f'{self.path.name}_invalid')
+        return state
 
     def begin(self, intent: dict) -> dict:
         with FileLock(self.lock):
