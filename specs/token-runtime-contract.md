@@ -142,3 +142,37 @@ HOME/config/XDG는 worktree `dist/pack-smoke/home`으로 격리하고 file backe
 Keychain, live token, inference, daemon, DB, publish/push/merge를 실행하지 않았다.
 이 로컬 custom artifact 결과는 Happy adapter에 유용한 호환성 근거이며 공개
 릴리스/pin 지원이나 실제 provider 실행 성공의 증거는 아니다.
+
+## Internal organization reservation bridge v1
+
+`organizationCollectorVersion:1` and `cswap token-runtime collect-org` are additive.
+Input is a <=8192-byte stdin JSON trusted-Core DTO, never credential arguments:
+`{version:1,context:{companyId,machineId,managedAccountId,credentialGeneration,
+policyRevision,accountRef},permit:{version:1,permitId,companyId,machineId,
+managedAccountId,credentialGeneration,policyRevision,reservedAt,transportDeadline,
+expiresAt,timeoutMs:10000,accountRemaining,companyRemaining},inUse:true,online:true}`.
+Times are epoch milliseconds. Core must verify Studio's signed envelope and local
+ownership before constructing this internal DTO. This local CLI is NOT a public
+signature verifier or admin-consent API; local filesystem/process authority is its
+trust boundary. Desktop never invokes it directly with a renderer's plain permit.
+
+Strict scope/generation/time checks, durable permit digest consumption and shared
+collector singleflight precede exactly one fixed inference request. Transit reduces
+the 10s transport deadline. Local machine/token spending survives consent/import/
+replacement and failed/late requests. Repeated token shares cooldown/backoff, including
+validated Retry-After. Server managed-account/company debit is an additional authoritative
+bound; local per-token bucket alone can change on new token generation. No personal
+consent is changed, no receiver fallback, no local org observation cache is claimed.
+Current roster digest/ref/generation is compared before and after transport, late
+results discarded. Output `{version:1,artifact,observation,applied:false}` or
+`{version:1,artifact,reason,applied:false}`. Core converts/whitelists observation
+before publish. Missing signer/config/assignment MUST stop before this bridge.
+Automatic rotation and true prepared-profile support are still pending as above.
+
+Organization bridge validation (2026-10-04):
+`uv run --frozen pytest -n 0 tests/test_org_probe.py tests/test_token_probe.py tests/test_token_runtime.py`
+66 passed; compileall and selected E9/F ruff checks passed. `uv build --out-dir dist`,
+lock-preserving installed-wheel reinstall and `tests/pack_token_runtime.py` passed,
+including actual wheel file-backend managed import/replacement/export and organization
+fake-HTTP/replay. Repeatable fixtures use a new synthetic token per generation so
+retained token cooldown is never reset to make the test pass. No live traffic.

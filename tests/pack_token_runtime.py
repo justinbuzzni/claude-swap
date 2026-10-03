@@ -65,12 +65,43 @@ def main():
     row = TokenRuntime(switcher).status()['accounts'][0]
     assert row['number'] == 1 and row['managedAccountId'] == identity and not row['probeEnabled']
     payload['accounts'][0]['credentialGeneration'] += 1
-    payload['accounts'][0]['credentials']['claudeAiOauth']['accessToken'] = 'sk-ant-oat01-pack-replacement'
+    payload['accounts'][0]['credentials']['claudeAiOauth']['accessToken'] = 'sk-ant-oat01-pack-replacement-' + str(payload['accounts'][0]['credentialGeneration'])
     fixture.write_text(json.dumps(payload))
     import_accounts(switcher, str(fixture))
     replacement = TokenRuntime(switcher).status()['accounts'][0]
     assert replacement['accountRef'] == row['accountRef']
     assert replacement['credentialGeneration'] == row['credentialGeneration'] + 1
+    # Real installed-artifact org bridge with a fake HTTP opener; all other network stays blocked.
+    import time
+    import uuid
+    from unittest.mock import patch
+    from claude_swap.org_probe import collect_org
+    now = time.time()
+    generation = replacement['credentialGeneration']
+    permit = dict(version=1, permitId=str(uuid.uuid4()), companyId='pack-company', machineId='pack-machine',
+                  managedAccountId=identity, credentialGeneration=generation, policyRevision=1,
+                  reservedAt=int(now*1000), transportDeadline=int(now*1000)+10000,
+                  expiresAt=int(now*1000)+30000, timeoutMs=10000, accountRemaining=95, companyRemaining=287)
+    context = {k:permit[k] for k in ('companyId','machineId','managedAccountId','credentialGeneration','policyRevision')}
+    context['accountRef'] = replacement['accountRef']
+    class Response:
+        status = 200
+        headers = {'anthropic-ratelimit-unified-5h-utilization':'0.4','anthropic-ratelimit-unified-5h-reset':str(now+3600)}
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self, size): return b'{}'
+    class Opener:
+        def open(self, request, timeout):
+            assert request.full_url == 'https://api.anthropic.com/v1/messages'
+            assert 0 < timeout <= 10
+            assert json.loads(request.data)['messages'] == [{'role':'user','content':'Hi'}]
+            return Response()
+    grant = dict(version=1, context=context, permit=permit, online=True, inUse=True)
+    with patch('urllib.request.build_opener', return_value=Opener()):
+        result = collect_org(TokenRuntime(switcher), grant)
+    assert result['observation']['windows'][0]['pct'] == 40
+    assert collect_org(TokenRuntime(switcher), grant)['reason'] == 'permit_replayed'
+    assert 'sk-ant-oat01-' not in json.dumps(result)
     export_accounts(switcher, str(fixture))
     exported = json.loads(fixture.read_text())['accounts'][0]
     assert exported['displayName'] == 'Pack fixture' and exported['kind'] == 'oauth'
@@ -81,7 +112,7 @@ def main():
         names = pack.getnames()
         assert not any('/.uv-cache/' in name or '/.venv/' in name or '/.ruff_cache/' in name for name in names)
         assert any(name.endswith('specs/token-runtime-contract.md') for name in names)
-    print('Installed-wheel smoke passed: marker, managed import/status/replacement/export, archive contents; offline file backend')
+    print('Installed-wheel smoke passed: marker, managed import/status/replacement/export, org fake-HTTP/replay, archive contents; offline file backend')
 
 
 if __name__ == '__main__':

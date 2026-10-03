@@ -22,7 +22,7 @@ ARTIFACT = 'saycode-setup-token-runtime-v1'
 
 def capabilities():
     return dict(version=1, artifact=ARTIFACT, setupTokenObservation=True,
-                managedAccountMetadata=True, durableProbeBudget=True,
+                managedAccountMetadata=True, durableProbeBudget=True, organizationCollectorVersion=1,
                 rotationSuggestion=True, automaticRotation=False,
                 rotationWriterOwnership=False)
 
@@ -308,6 +308,7 @@ def command(argv):
     sub = parser.add_subparsers(dest='action', required=True)
     sub.add_parser('capabilities')
     sub.add_parser('status')
+    sub.add_parser('collect-org')
     consent = sub.add_parser('consent')
     consent.add_argument('account_ref')
     mode = consent.add_mutually_exclusive_group(required=True)
@@ -325,8 +326,21 @@ def command(argv):
     if args.action == 'capabilities':
         result = capabilities()
     else:
+        grant = None
+        if args.action == 'collect-org':
+            import sys
+            raw = sys.stdin.read(8193)
+            if len(raw.encode()) > 8192:
+                raise ValueError('grant_invalid')
+            try:
+                grant = json.loads(raw)
+            except ValueError:
+                raise ValueError('grant_invalid') from None
         runtime = TokenRuntime(ClaudeAccountSwitcher())
-        if args.action == 'status':
+        if args.action == 'collect-org':
+            from claude_swap.org_probe import collect_org
+            result = collect_org(runtime, grant)
+        elif args.action == 'status':
             result = runtime.status()
         elif args.action == 'consent':
             result = runtime.consent(args.account_ref, enabled=args.enable, ack_cost=args.ack_cost)

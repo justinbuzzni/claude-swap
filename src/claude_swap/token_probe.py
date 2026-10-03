@@ -102,7 +102,7 @@ def _read_bounded(response, deadline):
             return True
 
 
-def probe(token: str, *, now: float | None = None) -> dict:
+def probe(token: str, *, now: float | None = None, timeout_s: float = 10) -> dict:
     now = time.time() if now is None else now
     result = {'version': 1, 'source': 'inference_probe', 'observedAt': iso(now),
               'windows': parse_headers({}), 'coverage': 'unknown', 'reason': None,
@@ -114,8 +114,8 @@ def probe(token: str, *, now: float | None = None) -> dict:
     # Ignore HTTP(S)_PROXY and all base-url overrides. Redirects never carry auth.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     try:
-        deadline = time.monotonic() + 10
-        with opener.open(request, timeout=10) as response:
+        deadline = time.monotonic() + min(10, timeout_s)
+        with opener.open(request, timeout=min(10, timeout_s)) as response:
             status, headers = response.status, response.headers
             if not _read_bounded(response, deadline):
                 result['reason'] = 'response_too_large'
