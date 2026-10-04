@@ -1522,3 +1522,13 @@ class TestLoginExpiresAtIso:
     ])
     def test_anything_but_a_positive_epoch_is_unknown(self, creds):
         assert oauth.login_expires_at_iso(creds) is None
+
+
+def test_setup_token_missing_refresh_is_not_permanent_dead():
+    credentials = json.dumps({'claudeAiOauth':{'accessToken':'sk-ant-oat01-fixture','scopes':['user:inference']}})
+    with patch('urllib.request.urlopen') as http:
+        outcome = oauth.try_refresh_oauth_credentials(credentials)
+        http.assert_not_called()
+    assert outcome.error == 'setup_token_not_refreshable'
+    from claude_swap.usage_store import PERMANENT_AUTH_ERRORS
+    assert outcome.error not in PERMANENT_AUTH_ERRORS

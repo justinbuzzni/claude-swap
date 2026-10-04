@@ -11,6 +11,7 @@ import sys
 from claude_swap import __version__, paths, printer
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.json_output import error_envelope
+from claude_swap.rotation_owner import run_as_writer
 from claude_swap.printer import (
     accent,
     bolded,
@@ -977,6 +978,16 @@ def _menubar_service(args) -> int:
 
 def main() -> None:
     """Main entry point for the CLI."""
+    if sys.argv[1:2] == ["token-runtime"]:
+        from claude_swap.token_runtime import command
+        try:
+            command(sys.argv[2:])
+        except (ClaudeSwitchError, ValueError, OSError):
+            # Never echo exception repr or untrusted credential inputs.
+            print(json.dumps({"version": 1, "artifact": "saycode-setup-token-runtime-v1",
+                              "error": "token_runtime_unavailable"}))
+            sys.exit(1)
+        return
     force_utf8_output()
     _use_native_tls()
     argv = sys.argv[1:]
@@ -1439,7 +1450,9 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
             else:
                 models = parse_model_names(load_settings(switcher.backup_dir).model)
                 model_source = "autoswitch.model" if models else None
-            payload = switcher.switch(
+            payload = run_as_writer(
+                "manual-cli",
+                switcher.switch,
                 strategy=args.strategy,
                 json_output=args.json,
                 models=models,
@@ -1449,8 +1462,9 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
                 payload["models"] = list(models)
                 payload["modelSource"] = model_source
         elif args.switch_to:
-            payload = switcher.switch_to(
-                args.switch_to, json_output=args.json, force=args.force
+            payload = run_as_writer(
+                "manual-cli", switcher.switch_to,
+                args.switch_to, json_output=args.json, force=args.force,
             )
         elif args.status:
             payload = switcher.status(json_output=args.json)

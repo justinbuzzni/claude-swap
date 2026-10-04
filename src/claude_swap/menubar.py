@@ -30,6 +30,7 @@ from pathlib import Path
 
 from claude_swap import pace
 from claude_swap.exceptions import ClaudeSwitchError, CredentialReadError
+from claude_swap.rotation_owner import run_as_writer
 from claude_swap.printer import warning
 from claude_swap.switcher import SENTINEL_NOTES
 
@@ -905,14 +906,14 @@ def run(switcher) -> int:
 
         def _make_switch_to(self, num):
             def cb(_sender):
-                if self._guard(lambda: self.switcher.switch_to(str(num))):
+                if self._guard(lambda: run_as_writer('menubar', self.switcher.switch_to, str(num))):
                     self._notify_switched()
                     self.refresh_async()
             return cb
 
         def _switch(self, strategy):
             def cb(_sender):
-                if self._guard(lambda: self.switcher.switch(strategy=strategy)):
+                if self._guard(lambda: run_as_writer('menubar', self.switcher.switch, strategy=strategy)):
                     self._notify_switched()
                     self.refresh_async()
             return cb

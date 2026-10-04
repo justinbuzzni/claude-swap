@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from claude_swap.exceptions import TransferError
+from claude_swap.exceptions import ConfigError, TransferError
 from claude_swap.models import Platform
 from claude_swap.oauth import credential_fingerprint
 from claude_swap.switcher import ClaudeAccountSwitcher
@@ -2205,3 +2205,266 @@ class TestImportUsage:
                 s, temp_home, _usage_document(_usage_row("alice@example.com"), bad)
             )
         assert not s._usage_store.path.exists()
+
+
+class TestManagedSetupMetadata:
+    def payload(self):
+        identity = '11111111-1111-4111-8111-111111111111'
+        return {'version':1, 'encrypted':False, 'accounts':[{
+            'number':1, 'kind':'oauth', 'email':f'{identity}@token.local',
+            'credentialType':'setup_token','managedAccountId':identity,
+            'displayName':'조직 계정', 'credentialGeneration':4,
+            'credentials':{'claudeAiOauth':{'accessToken':'sk-ant-oat01-fixture','scopes':['user:inference']}},
+            'config':{'oauthAccount':{'emailAddress':f'{identity}@token.local'}}}]}
+
+    def test_import_export_preserves_managed_metadata_without_identity_or_refresh(self, temp_home):
+        switcher = _linux_switcher(temp_home)
+        path = temp_home / 'managed.json'
+        path.write_text(json.dumps(self.payload()))
+        import_accounts(switcher, str(path))
+        export_accounts(switcher, str(path))
+        account = json.loads(path.read_text())['accounts'][0]
+        for key in ('credentialType','managedAccountId','displayName','credentialGeneration'):
+            assert account[key] == self.payload()['accounts'][0][key]
+        assert 'refreshToken' not in account['credentials']['claudeAiOauth']
+        assert not account.get('uuid')
+
+    @pytest.mark.parametrize('field,value', [('managedAccountId','bad'),('credentialGeneration',0),('credentialGeneration',True),('displayName',''),('displayName','x'*121),('credentialType','api_key')])
+    def test_invalid_managed_metadata_fails_before_any_write(self, temp_home, field, value):
+        switcher = _linux_switcher(temp_home)
+        payload = self.payload()
+        payload['accounts'][0][field] = value
+        path = temp_home / 'managed.json'
+        path.write_text(json.dumps(payload))
+        with pytest.raises(TransferError): import_accounts(switcher, str(path))
+        assert switcher._get_sequence_data()['accounts'] == {}
+
+    def test_stale_managed_generation_rejected_before_write(self, temp_home):
+        switcher = _linux_switcher(temp_home)
+        path = temp_home / 'managed.json'
+        payload = self.payload()
+        path.write_text(json.dumps(payload))
+        import_accounts(switcher, str(path))
+        before = switcher.read_account_credentials('1',payload['accounts'][0]['email'])
+        payload['accounts'][0]['credentialGeneration'] = 3
+        payload['accounts'][0]['credentials']['claudeAiOauth']['accessToken'] = 'sk-ant-oat01-stale'
+        path.write_text(json.dumps(payload))
+        with pytest.raises(TransferError, match='managed generation conflict'):
+            import_accounts(switcher,str(path),force=True)
+        assert switcher.read_account_credentials('1',payload['accounts'][0]['email']) == before
+
+    def test_higher_managed_generation_replaces_without_force_and_invalidates_usage(self, temp_home):
+        switcher = _linux_switcher(temp_home)
+        path = temp_home / 'managed.json'
+        payload = self.payload()
+        path.write_text(json.dumps(payload))
+        import_accounts(switcher,str(path))
+        email = payload['accounts'][0]['email']
+        switcher._usage_store.record({'1':FetchRecord(usage={'5h':{'pct':20},'7d':{'pct':30}})}, {'1':(email,'')})
+        assert switcher._usage_store.entries({'1':(email,'')})['1'].decision_value() is not None
+        payload['accounts'][0]['credentialGeneration'] = 5
+        payload['accounts'][0]['credentials']['claudeAiOauth']['accessToken'] = 'sk-ant-oat01-newer'
+        path.write_text(json.dumps(payload))
+        import_accounts(switcher,str(path))
+        row = switcher._get_sequence_data()['accounts']['1']
+        assert row['credentialGeneration'] == 5
+        assert switcher._usage_store.entries({'1':(email,'')})['1'].last_good is None
+        assert 'sk-ant-oat01-newer' in switcher.read_account_credentials('1',email)
+        assert len(switcher._get_sequence_data()['accounts']) == 1
+
+    def test_same_managed_generation_different_token_is_conflict(self, temp_home):
+        switcher = _linux_switcher(temp_home)
+        path = temp_home / 'managed.json'
+        payload = self.payload()
+        path.write_text(json.dumps(payload))
+        import_accounts(switcher,str(path))
+        payload['accounts'][0]['credentials']['claudeAiOauth']['accessToken'] = 'sk-ant-oat01-conflict'
+        path.write_text(json.dumps(payload))
+        with pytest.raises(TransferError,match='managed generation conflict'):
+            import_accounts(switcher,str(path),force=True)
+
+    def test_list_json_preserves_metadata_without_provider_identity(self,temp_home):
+        switcher = _linux_switcher(temp_home)
+        path = temp_home / 'managed.json'
+        path.write_text(json.dumps(self.payload()))
+        import_accounts(switcher,str(path))
+        info = switcher._build_accounts_info()
+        entries = switcher._usage_store.entries({'1':(info[0][1],'')})
+        account = switcher._build_list_payload(info,entries)['accounts'][0]
+        assert account['displayName'] == '조직 계정'
+        assert account['managedAccountId'] == self.payload()['accounts'][0]['managedAccountId']
+
+    def test_managed_replacement_rolls_back_on_config_failure(self,temp_home):
+        switcher = _linux_switcher(temp_home)
+        path = temp_home / 'managed.json'
+        payload = self.payload()
+        path.write_text(json.dumps(payload))
+        import_accounts(switcher,str(path))
+        email = payload['accounts'][0]['email']
+        before = switcher.read_account_credentials('1',email)
+        payload['accounts'][0]['credentialGeneration'] = 5
+        payload['accounts'][0]['credentials']['claudeAiOauth']['accessToken'] = 'sk-ant-oat01-newer'
+        path.write_text(json.dumps(payload))
+        original = switcher._write_account_config
+        calls = []
+        def fail_once(*args):
+            calls.append(1)
+            if len(calls) == 1: raise OSError('fixture disk failure')
+            return original(*args)
+        with patch.object(switcher,'_write_account_config',side_effect=fail_once):
+            with pytest.raises(OSError): import_accounts(switcher,str(path))
+        assert switcher.read_account_credentials('1',email) == before
+        assert switcher._get_sequence_data()['accounts']['1']['credentialGeneration'] == 4
+
+    @pytest.mark.parametrize('slot', [None, 1, 2])
+    def test_managed_upgrade_refuses_live_capture(self, temp_home, monkeypatch, slot):
+        monkeypatch.setattr('claude_swap.oauth.fetch_oauth_profile', lambda *args, **kwargs: None)
+        switcher = _linux_switcher(temp_home)
+        path = temp_home / 'managed.json'
+        payload = self.payload()
+        account = payload['accounts'][0]
+        account['credentialGeneration'] = 1
+        path.write_text(json.dumps(payload))
+        import_accounts(switcher, str(path))
+        switcher.switch_to('1', json_output=True, force=True)
+        account['credentialGeneration'] = 2
+        account['credentials']['claudeAiOauth']['accessToken'] = 'sk-ant-oat01-fixture-generation-two'
+        path.write_text(json.dumps(payload))
+        import_accounts(switcher, str(path))
+        before = switcher._get_sequence_data()
+        with pytest.raises(ConfigError, match='Managed accounts.*import'):
+            switcher.add_account(slot=slot, assume_yes=True)
+        assert switcher._get_sequence_data() == before
+        export_accounts(switcher, str(path))
+        assert json.loads(path.read_text())['accounts'][0]['credentials'] == account['credentials']
+
+    @pytest.mark.parametrize('slot', [None, 1])
+    def test_capture_rechecks_managed_import_after_preparation(self, temp_home, monkeypatch, slot):
+        monkeypatch.setattr('claude_swap.oauth.fetch_oauth_profile', lambda *args, **kwargs: None)
+        switcher = _linux_switcher(temp_home)
+        payload = self.payload()
+        account = payload['accounts'][0]
+        switcher._get_claude_config_path().write_text(json.dumps(account['config']))
+        switcher._write_credentials(json.dumps(account['credentials']))
+        account['credentials']['claudeAiOauth']['accessToken'] = 'sk-ant-oat01-fixture-imported'
+        path = temp_home / 'managed.json'
+        path.write_text(json.dumps(payload))
+        # Import lands after capture picked a free slot and read the old live bytes.
+        with patch.object(switcher, '_reject_identity_drift_since_verify', side_effect=lambda _: import_accounts(switcher, str(path))):
+            with pytest.raises(ConfigError, match='Managed accounts.*import'):
+                switcher.add_account(slot=slot, assume_yes=True)
+        export_accounts(switcher, str(path))
+        exported = json.loads(path.read_text())['accounts'][0]
+        assert exported['credentials'] == account['credentials']
+        assert exported['managedAccountId'] == account['managedAccountId']
+
+    @pytest.mark.parametrize('slot', [None, 1, 2])
+    def test_managed_slot_refuses_add_token(self, temp_home, slot):
+        switcher = _linux_switcher(temp_home)
+        path = temp_home / 'managed.json'
+        payload = self.payload()
+        account = payload['accounts'][0]
+        path.write_text(json.dumps(payload))
+        import_accounts(switcher, str(path))
+        before = switcher._get_sequence_data()
+        with pytest.raises(ConfigError, match='Managed accounts.*import'):
+            switcher.add_account_from_token(token='sk-ant-oat01-fixture-old', email=account['email'], slot=slot, assume_yes=True)
+        assert switcher._get_sequence_data() == before
+        export_accounts(switcher, str(path))
+        assert json.loads(path.read_text())['accounts'][0]['credentials'] == account['credentials']
+
+    def test_add_token_rechecks_import_after_slot_selection(self, temp_home):
+        switcher = _linux_switcher(temp_home)
+        payload = self.payload()
+        path = temp_home / 'managed.json'
+        path.write_text(json.dumps(payload))
+        choose = switcher._get_next_account_number
+        def choose_then_import():
+            selected = choose()
+            import_accounts(switcher, str(path))
+            return selected
+        with patch.object(switcher, '_get_next_account_number', side_effect=choose_then_import):
+            with pytest.raises(ConfigError, match='Managed accounts.*import'):
+                switcher.add_account_from_token(token='sk-ant-oat01-fixture-old', email='personal@token.local')
+        export_accounts(switcher, str(path))
+        assert json.loads(path.read_text())['accounts'][0]['credentials'] == payload['accounts'][0]['credentials']
+
+    @pytest.mark.parametrize('writer', ['write_account_credentials', 'persist_backup_credentials', 'profile'])
+    def test_managed_slot_refuses_legacy_backup_writers(self, temp_home, writer):
+        switcher = _linux_switcher(temp_home)
+        path = temp_home / 'managed.json'
+        payload = self.payload()
+        account = payload['accounts'][0]
+        path.write_text(json.dumps(payload))
+        import_accounts(switcher, str(path))
+        old = json.dumps({'claudeAiOauth': {'accessToken': 'sk-ant-oat01-fixture-old'}})
+        if writer == 'profile':
+            with patch('claude_swap.session.profile_is_quiescent', return_value=True), patch.object(switcher, '_session_profile_ahead', return_value=old):
+                assert switcher._adopt_session_credential('1', account['email'], '') is False
+        else:
+            with pytest.raises(ConfigError, match='Managed accounts.*import'):
+                getattr(switcher, writer)('1', account['email'], old)
+        export_accounts(switcher, str(path))
+        assert json.loads(path.read_text())['accounts'][0]['credentials'] == account['credentials']
+
+    def test_managed_slot_refuses_live_rotation_resync(self, temp_home):
+        switcher = _linux_switcher(temp_home)
+        path = temp_home / 'managed.json'
+        payload = self.payload()
+        path.write_text(json.dumps(payload))
+        import_accounts(switcher, str(path))
+        account = payload['accounts'][0]
+        email = account['email']
+        # A previously attributed full OAuth pair is stronger than the normal
+        # setup-token live fixture (which has no refresh token). It still must
+        # not authorize replacing an import-owned generation.
+        live = json.dumps({'claudeAiOauth': {'accessToken': 'synthetic-live', 'refreshToken': 'synthetic-refresh'}})
+        switcher._probe_verdicts[switcher._lineage_key('1', email, credential_fingerprint(live))] = True
+        with patch.object(switcher, '_live_identity_matches', return_value=True), patch.object(switcher, '_read_credentials', return_value=live):
+            switcher._resync_rotated_backup('1', email, '', live)
+        export_accounts(switcher, str(path))
+        exported = json.loads(path.read_text())['accounts'][0]
+        assert exported['credentials'] == account['credentials']
+        assert exported['credentialGeneration'] == account['credentialGeneration']
+
+    def test_managed_upgrade_survives_ordinary_switch(self, temp_home, monkeypatch):
+        from claude_swap.token_runtime import TokenRuntime
+        import urllib.error
+        def offline(*args, **kwargs):
+            raise urllib.error.URLError('offline fixture')
+        monkeypatch.setattr('urllib.request.urlopen', offline)
+        monkeypatch.setattr('claude_swap.oauth.fetch_oauth_profile', lambda *args, **kwargs: None)
+        switcher = _linux_switcher(temp_home)
+        path = temp_home / 'managed.json'
+        payload = self.payload()
+        account = payload['accounts'][0]
+        account['credentialGeneration'] = 1
+        path.write_text(json.dumps(payload))
+        import_accounts(switcher, str(path))
+        switcher.switch_to('1', json_output=True, force=True)
+        account['credentialGeneration'] = 2
+        account['credentials']['claudeAiOauth']['accessToken'] = 'sk-ant-oat01-fixture-generation-two'
+        path.write_text(json.dumps(payload))
+        import_accounts(switcher, str(path))
+        # No forced activation: the old token deliberately remains in the live store.
+        switcher.add_account_from_token(token='sk-ant-oat01-fixture-other', email='other@token.local')
+        switcher.switch_to('2', json_output=True)
+        export_accounts(switcher, str(path))
+        exported = next(a for a in json.loads(path.read_text())['accounts'] if a.get('managedAccountId'))
+        assert exported['credentialGeneration'] == 2
+        assert exported['credentials'] == account['credentials']
+        status = TokenRuntime(switcher).status()
+        assert next(a for a in status['accounts'] if a.get('managedAccountId'))['credentialGeneration'] == 2
+
+    def test_managed_export_uses_stored_generation_not_old_active_token(self,temp_home):
+        switcher = _linux_switcher(temp_home)
+        path = temp_home / 'managed.json'
+        payload = self.payload()
+        path.write_text(json.dumps(payload))
+        import_accounts(switcher,str(path))
+        email = payload['accounts'][0]['email']
+        with patch.object(switcher,'_get_current_account',return_value=(email,'')), patch.object(switcher,'_read_credentials',return_value=json.dumps({'claudeAiOauth':{'accessToken':'sk-ant-oat01-old-live'}})):
+            export_accounts(switcher,str(path))
+        row = json.loads(path.read_text())['accounts'][0]
+        assert row['kind'] == 'oauth'
+        assert row['credentials']['claudeAiOauth']['accessToken'] == 'sk-ant-oat01-fixture'

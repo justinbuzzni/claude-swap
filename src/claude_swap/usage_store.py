@@ -1246,6 +1246,13 @@ class UsageStore:
 
         self._mutate(identities, plans.keys(), apply)
 
+    def invalidate_credentials(self, nums: Iterable[str], identities: dict[str, Identity]) -> None:
+        """Replacement credentials cannot inherit last-good or in-flight claims."""
+        def apply(num: str, row: dict) -> None:
+            row.clear()
+            row.update(self._fresh_row(identities[num]))
+        self._mutate(identities, nums, apply)
+
     def clear_dead_token(
         self, nums: Iterable[str], identities: dict[str, Identity]
     ) -> None:

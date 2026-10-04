@@ -163,6 +163,12 @@ def try_refresh_oauth_credentials(
     if not isinstance(data, dict):
         return RefreshOutcome(None, "transient")
     oauth = data.get("claudeAiOauth")
+    if isinstance(oauth, dict) and not oauth.get("refreshToken"):
+        access = oauth.get("accessToken")
+        if isinstance(access, str) and access.startswith("sk-ant-oat01-"):
+            # setup-token intentionally has no refresh grant; absence is not
+            # evidence of invalid authentication or a dead OAuth lineage.
+            return RefreshOutcome(None, "setup_token_not_refreshable")
     if not isinstance(oauth, dict) or not oauth.get("refreshToken"):
         return RefreshOutcome(None, "no_refresh_token")
 

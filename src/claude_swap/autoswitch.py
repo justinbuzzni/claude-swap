@@ -46,6 +46,7 @@ from claude_swap import oauth, poll_policy
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.json_output import SCHEMA_VERSION, USAGE_TOKEN_EXPIRED
 from claude_swap.locking import FileLock
+from claude_swap.rotation_owner import LEGACY_OWNER, LeaseStore, SelectionConflict, writing_as
 from claude_swap.poll_policy import (
     ESCALATION_MARGIN_PCT,
     RESET_SLACK_S,
@@ -2128,7 +2129,18 @@ class AutoSwitchEngine:
                 self._emit(NoSwitchEvent(reason="cooldown"))
                 return TickOutcome.NO_ACTION
 
-            result = self.switcher.switch_to(number, json_output=True)
+            # Legacy engines share one rotation owner; an enhanced owner's
+            # lease is checked under the switch lock, so the two never race.
+            try:
+                with writing_as(LEGACY_OWNER):
+                    result = self.switcher.switch_to(
+                        number,
+                        json_output=True,
+                        guard=LeaseStore(self.switcher.backup_dir).legacy_guard(),
+                    )
+            except SelectionConflict as conflict:
+                self._emit(NoSwitchEvent(reason="rotation-owned", detail=conflict.reason))
+                return TickOutcome.NO_ACTION
             if not result or not result.get("switched"):
                 self._emit(
                     NoSwitchEvent(
