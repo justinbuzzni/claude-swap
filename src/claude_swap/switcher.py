@@ -3536,6 +3536,19 @@ class ClaudeAccountSwitcher:
             raise ConfigError("No active Claude account found. Please log in first.")
         current_email, current_org_uuid, current_account_uuid = identity
 
+        # Live capture cannot refresh, move or replace an import-owned slot:
+        # the live login may still carry G1 after G2 was imported.
+        def refuse_managed_capture(target: str | None) -> None:
+            accounts = self._get_sequence_data().get("accounts", {})
+            if any(record.get("managedAccountId") and (
+                (record.get("email") == current_email
+                 and (record.get("organizationUuid") or "") == current_org_uuid)
+                or number == target
+            ) for number, record in accounts.items()):
+                raise ConfigError("Managed accounts must be updated through import")
+
+        refuse_managed_capture(str(slot) if slot is not None else None)
+
         # When no slot specified and account already exists, refresh credentials in place
         if slot is None and self._account_exists(current_email, current_org_uuid):
             seq = self._get_sequence_data()
@@ -3582,18 +3595,21 @@ class ClaudeAccountSwitcher:
             # on a race.
             self._reject_identity_drift_since_verify(identity)
 
-            self._write_account_credentials(account_num, current_email, current_creds)
-            self._write_account_config(account_num, current_email, current_config)
-            self._usage_store.clear_dead_token(
-                [account_num], {account_num: (current_email, current_org_uuid)}
-            )
+            with FileLock(self.lock_file):
+                refuse_managed_capture(account_num)
+                seq = self._get_sequence_data()
+                self._write_account_credentials(account_num, current_email, current_creds)
+                self._write_account_config(account_num, current_email, current_config)
+                self._usage_store.clear_dead_token(
+                    [account_num], {account_num: (current_email, current_org_uuid)}
+                )
 
-            if alias is not None:
-                seq["accounts"][account_num]["alias"] = alias
+                if alias is not None:
+                    seq["accounts"][account_num]["alias"] = alias
 
-            seq["activeAccountNumber"] = int(account_num)
-            seq["lastUpdated"] = get_timestamp()
-            self._write_json(self.sequence_file, seq)
+                seq["activeAccountNumber"] = int(account_num)
+                seq["lastUpdated"] = get_timestamp()
+                self._write_json(self.sequence_file, seq)
 
             tag = self._get_display_tag(current_email, matched_org_name, current_org_uuid)
             self._logger.info(f"Updated credentials for account {account_num}: {current_email}")
@@ -3704,52 +3720,54 @@ class ClaudeAccountSwitcher:
 
         self._reject_identity_drift_since_verify(identity)
 
-        # Now safe to perform destructive cleanup (new account data is in memory)
-        if displace_slot:
-            d_num, d_email, d_org = displace_slot
-            self._delete_account_files(d_num, d_email)
+        with FileLock(self.lock_file):
+            refuse_managed_capture(account_num)
+            # Now safe to perform destructive cleanup (new account data is in memory)
+            if displace_slot:
+                d_num, d_email, d_org = displace_slot
+                self._delete_account_files(d_num, d_email)
+                data = self._get_sequence_data()
+                if int(d_num) in data["sequence"]:
+                    data["sequence"].remove(int(d_num))
+                del data["accounts"][d_num]
+                self._write_json(self.sequence_file, data)
+                self._prune_mappings(d_email, d_org)
+
+            if migrate_from:
+                data = self._get_sequence_data()
+                old_email = data["accounts"][migrate_from].get("email", "")
+                self._delete_account_files(migrate_from, old_email)
+                if int(migrate_from) in data["sequence"]:
+                    data["sequence"].remove(int(migrate_from))
+                del data["accounts"][migrate_from]
+                self._write_json(self.sequence_file, data)
+
+            # Store backups
+            self._write_account_credentials(account_num, current_email, current_creds)
+            self._write_account_config(account_num, current_email, current_config)
+            self._usage_store.clear_dead_token(
+                [account_num], {account_num: (current_email, organization_uuid)}
+            )
+
+            # Update sequence.json
             data = self._get_sequence_data()
-            if int(d_num) in data["sequence"]:
-                data["sequence"].remove(int(d_num))
-            del data["accounts"][d_num]
+            data["accounts"][account_num] = {
+                "email": current_email,
+                "uuid": account_uuid,
+                "organizationUuid": organization_uuid,
+                "organizationName": organization_name,
+                "added": get_timestamp(),
+            }
+            carried_alias = alias if alias is not None else existing_alias
+            if carried_alias:
+                data["accounts"][account_num]["alias"] = carried_alias
+            if int(account_num) not in data["sequence"]:
+                data["sequence"].append(int(account_num))
+                data["sequence"].sort()
+            data["activeAccountNumber"] = int(account_num)
+            data["lastUpdated"] = get_timestamp()
+
             self._write_json(self.sequence_file, data)
-            self._prune_mappings(d_email, d_org)
-
-        if migrate_from:
-            data = self._get_sequence_data()
-            old_email = data["accounts"][migrate_from].get("email", "")
-            self._delete_account_files(migrate_from, old_email)
-            if int(migrate_from) in data["sequence"]:
-                data["sequence"].remove(int(migrate_from))
-            del data["accounts"][migrate_from]
-            self._write_json(self.sequence_file, data)
-
-        # Store backups
-        self._write_account_credentials(account_num, current_email, current_creds)
-        self._write_account_config(account_num, current_email, current_config)
-        self._usage_store.clear_dead_token(
-            [account_num], {account_num: (current_email, organization_uuid)}
-        )
-
-        # Update sequence.json
-        data = self._get_sequence_data()
-        data["accounts"][account_num] = {
-            "email": current_email,
-            "uuid": account_uuid,
-            "organizationUuid": organization_uuid,
-            "organizationName": organization_name,
-            "added": get_timestamp(),
-        }
-        carried_alias = alias if alias is not None else existing_alias
-        if carried_alias:
-            data["accounts"][account_num]["alias"] = carried_alias
-        if int(account_num) not in data["sequence"]:
-            data["sequence"].append(int(account_num))
-            data["sequence"].sort()
-        data["activeAccountNumber"] = int(account_num)
-        data["lastUpdated"] = get_timestamp()
-
-        self._write_json(self.sequence_file, data)
         tag = self._get_display_tag(current_email, organization_name, organization_uuid)
         self._logger.info(f"Added account {account_num}: {current_email} (org: {organization_uuid or 'personal'})")
         if migrate_from:
@@ -4751,6 +4769,10 @@ class ClaudeAccountSwitcher:
                 FileLock(self.lock_file),
                 claude_credentials_lock(),
             ):
+                # A profile verdict attributes identity, not managed generation.
+                # Check under the import/switch lock before any live-to-backup write.
+                if self._get_sequence_data().get("accounts", {}).get(account_num, {}).get("managedAccountId"):
+                    return
                 # Identity re-check under the lock: a switch/login landing in
                 # the gap means the live store is no longer this account's.
                 if not self._live_identity_matches(email, org_uuid):
@@ -6481,6 +6503,8 @@ class ClaudeAccountSwitcher:
 
         Returns ``(kind, foreign_slot)``:
 
+        - ``"managed-import"`` — the stored generation is import-owned;
+          live bytes must never overwrite it, even after a newer import.
         - ``"own-bytes"``      — byte-identical to the slot's stored backup;
           nothing changed, nothing to capture.
         - ``"own-family"``     — same refresh-token lineage (access token
@@ -6529,6 +6553,11 @@ class ClaudeAccountSwitcher:
           the extra safety.
         """
         backup = self._read_account_credentials(current_account, current_email)
+        if backup and data.get("accounts", {}).get(current_account, {}).get("managedAccountId"):
+            # Managed generations are owned by validated import, not the live
+            # login. Import deliberately leaves live bytes unchanged; backing
+            # those up on departure would restore G1 under G2's metadata.
+            return ("managed-import", None)  # Preserve credentials; config-only backup.
         if backup and backup == original_creds:
             return ("own-bytes", None)
         if backup and (
@@ -7181,7 +7210,8 @@ class ClaudeAccountSwitcher:
                         "differs from the stored backup and ownership could "
                         "not be verified — pre-fix backup)"
                     )
-                elif kind == "own-bytes":
+                elif kind in {"own-bytes", "managed-import"}:
+                    # Managed imports own their credential generation. Otherwise:
                     # Untouched since cswap wrote it — the slot already holds
                     # these bytes. Refresh only the config backup. (Rare since
                     # #145: activation composes live shared MCP state into the

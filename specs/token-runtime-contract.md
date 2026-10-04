@@ -423,3 +423,80 @@ installed wheel bytes are unchanged; no additional live calls were made.
 동일 설치 wheel(source2fef57e)의 합성 file-backend 경로에서 실제 Studio prepare→installed daemon group-sync→HTTP complete applied, 교체/회수·정상 daemon restart 보존과 원래 token의 forward generation3 복구가 통과했다. scoped slot/export는 복구된 token, 전역 활성 login은 교체 token을 유지했다. 이는 import/backup과 switch 활성화를 분리하는 기존 transfer 계약이다. fresh signed generation3 Happy/Claude 대역 spawn에서 정확 scoped token 전달을 확인했으므로 전역 login을 덮어쓰지 않았다. 직접 terminal binding은 보장하지 않는다. 부모 source/result/provenance/cleanup 검토·assertions 통과, 근거 `/tmp/claude/studio-deploy-recovery.b2r665ab/`.
 
 실제 Happy/SDK+실계정 결합·Keychain 접근 차단·장기 유지·identity·full coverage·managed-data artifact downgrade는 미수락이다. Runtime source/wheel·운영 store/daemon/pin 변경 없음, automaticRotation/externalWriterExclusion false 유지.
+
+
+## Offline review fix — 2026-10-04
+
+Status: implemented, verified and independently reviewed in the isolated provider worktree;
+source accepted for the existing feature PR. Current source evidence only; historical acceptance above is not a substitute.
+
+- [x] Reproduced G1 active -> G2 managed import without activation -> ordinary switch
+  to another account -> export/status. RED: exported credentials regressed to synthetic
+  G1 while metadata still claimed G2. Regression:
+  `tests/test_transfer.py::TestManagedSetupMetadata::test_managed_upgrade_survives_ordinary_switch`.
+- [x] Minimal fix: `_classify_outgoing_credential` treats a managed imported slot's
+  stored credentials as authoritative (`managed-import`). Ordinary switch backs up
+  config only and cannot replace the imported generation with stale active bytes.
+  Personal OAuth lineage backup behavior is unchanged.
+- [x] GREEN: the same regression exports exact G2 credentials and status generation2.
+  Happy's offline source integration additionally performs the ordinary switch and
+  binds exact G2 through the actual provider CLI adapter. That integration also verifies
+  personal timeout spending/backoff after a synthetic 10 s transport failure with
+  Happy's corrected 30 s process deadline.
+- [x] Related verification: `.venv/bin/python -m pytest -n 0 tests/test_transfer.py
+  tests/test_switcher.py tests/test_token_runtime.py --tb=short`: 654 passed (final follow-up). Both changed
+  Python files passed in-memory `compile`; `git diff --check` passed. Existing environment
+  has no Ruff executable/module, so lint was unavailable; nothing was installed.
+
+Fixtures use temporary HOME/config, synthetic credentials and a forced Linux file
+backend/offline transport. No real credentials/.env/Keychain, live inference, operating
+DB/daemon/services/signers/pins, dependency installs, full suites, commit or push.
+No native Keychain or packaged artifact acceptance is claimed. External writer exclusion
+and automatic rotation remain false; unknown coverage and published .279 downgrade
+remain intentional gates. The fix protects stored managed generation bytes; it does
+not update a running process's already-delivered credential or the old active login.
+
+
+### Parent follow-up: bounded live-to-backup audit — 2026-10-04
+
+- [x] The previous writes at switcher.py:3585/3728 were `add_account` refresh and
+  explicit-slot capture. RED: three G1-live/G2-import cases (no slot, same slot,
+  moving to another slot) accepted capture, overwriting credentials or replacing the
+  managed row. GREEN: capture refuses an import-owned source or target with ConfigError;
+  metadata and exact imported credential bytes remain unchanged.
+- [x] Entry-only checking was insufficient: two additional RED tests perform an actual
+  cooperating import after capture selected a free slot/read the live bytes, immediately
+  before commit. GREEN: both commit branches acquire the same FileLock as import/switch,
+  re-read managed metadata and retain the lock through cleanup and credential/config/index
+  writes. Network verification and prompts remain outside the lock. This deterministically
+  exercises the interleaving; it is not an operating multi-process stress run.
+- [x] The previous write at switcher.py:4782 was `_resync_rotated_backup`. Normal
+  setup-token live bytes have no refresh token and return early, but that was not a
+  managed-slot fence. RED: a synthetic full pair with a prior positive lineage verdict
+  overwrote the imported generation. GREEN: the resync path checks managed metadata
+  under its existing FileLock before writing, regardless of that identity verdict.
+- [x] Final related checks: six new regressions passed; full selected transfer/switcher/
+  token-runtime files total **654 passed**. Python in-memory syntax validation and
+  diff whitespace check passed. Happy final counts: **472 related + 2 offline source
+  integration tests**, with typecheck passed. Lint remains unavailable as recorded above.
+
+Source evidence: `add_account` local `refuse_managed_capture`, both FileLock commit
+blocks, and `_resync_rotated_backup`'s under-lock metadata check. Regressions are
+`test_managed_upgrade_refuses_live_capture`,
+`test_capture_rechecks_managed_import_after_preparation`, and
+`test_managed_slot_refuses_live_rotation_resync` in `tests/test_transfer.py`.
+This audit does **not** establish that every other credential-backup writer is fenced.
+`externalWriterExclusion:false` and `automaticRotation:false` remain unchanged. All reads
+were synthetic/file-backed; no operating credential store, service, DB or pin was used.
+Parent review/commit/push remains pending; no commit or push performed here.
+
+
+### Parent final source review — 2026-10-04
+
+Parent reviewed the final managed-import classifier, both FileLock capture commit
+branches and resync guard, and independently reran all seven new regressions: passed.
+Happy final adapter checks also passed (239 related tests; counts overlap child checks),
+and the two source integration tests were independently confirmed. The fork has no
+configured CI; local focused/syntax/whitespace checks are the current source evidence.
+The earlier installed wheel predates this correction and must be rebuilt/reaccepted.
+No all-writer exclusion, native Keychain, operating recovery or release acceptance is claimed.
