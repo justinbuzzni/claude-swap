@@ -395,3 +395,22 @@ roster field compatibility test already passed. Final related runtime/ownership/
 two-process-contention/autoswitch suites: 369 passed. Changed-file E9/F ruff and
 git diff --check passed. No full suite, live credentials, Keychain/inference,
 operating install/daemon, push, merge or deployment.
+
+
+### Bounded live setup-token probe (2026-10-04)
+
+At the user's request, two distinct setup-token values from the designated
+Desktop worktree .env were read in memory, with no token/body output or storage.
+The installed wheel's probe sent exactly one fixed Haiku4.5/Hi/max_tokens1 request
+per token (two total), timeout10s/body bound64KiB, no proxy override, redirect,
+retry or fallback. Both returned the200/usable path and unified5h/7d headers:
+first label1%/2% (allowed), second14%/87% (7d allowed_warning), observed at
+2026-10-04 04:48:41/42 UTC. Full reset details are in the Desktop context.
+
+This verifies minimal inference authentication and real header feasibility only.
+Provider account identity, full model coverage, actual Claude CLI env auth,
+long-term login, exact billing and extra-usage settings remain unverified.
+Coverage stays unknown and automaticRotation/externalWriterExclusion stay false.
+No operating store/daemon/pin was changed. Earlier no-live statements describe
+prior test runs; current cumulative live request count is2. Runtime source and
+installed wheel bytes are unchanged; no additional live calls were made.
