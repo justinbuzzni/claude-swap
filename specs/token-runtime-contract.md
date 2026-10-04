@@ -414,3 +414,12 @@ Coverage stays unknown and automaticRotation/externalWriterExclusion stay false.
 No operating store/daemon/pin was changed. Earlier no-live statements describe
 prior test runs; current cumulative live request count is2. Runtime source and
 installed wheel bytes are unchanged; no additional live calls were made.
+
+
+### 실제 CLI 및 scoped credential 복원 수락 후속 — 2026-10-04
+
+부모의 실제 Claude Code2.1.283 print 검증은 지정 token2개별 격리 HOME/env에서 고정 Haiku4.5·1turn·출력상한16·tools 없음·retry0·세션 미저장으로 둘 다 OK/exit0였다. token 제거 시 같은 HOME에서 auth status exit1/loggedIn false, token 있으면 oauth_token/loggedIn true다. 생성 파일12개 token 미저장, CLI 추정 비용 각$0.000274/합계$0.000548. 누적 live4회(이전 wheel 최소probe2+실제CLI2)이며 실제 청구액은 확인하지 않았다. 증거 `/tmp/claude-cli-acceptance-rkj05uv1/result.json`.
+
+동일 설치 wheel(source2fef57e)의 합성 file-backend 경로에서 실제 Studio prepare→installed daemon group-sync→HTTP complete applied, 교체/회수·정상 daemon restart 보존과 원래 token의 forward generation3 복구가 통과했다. scoped slot/export는 복구된 token, 전역 활성 login은 교체 token을 유지했다. 이는 import/backup과 switch 활성화를 분리하는 기존 transfer 계약이다. fresh signed generation3 Happy/Claude 대역 spawn에서 정확 scoped token 전달을 확인했으므로 전역 login을 덮어쓰지 않았다. 직접 terminal binding은 보장하지 않는다. 부모 source/result/provenance/cleanup 검토·assertions 통과, 근거 `/tmp/claude/studio-deploy-recovery.b2r665ab/`.
+
+실제 Happy/SDK+실계정 결합·Keychain 접근 차단·장기 유지·identity·full coverage·managed-data artifact downgrade는 미수락이다. Runtime source/wheel·운영 store/daemon/pin 변경 없음, automaticRotation/externalWriterExclusion false 유지.
