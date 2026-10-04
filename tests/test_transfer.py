@@ -2358,6 +2358,55 @@ class TestManagedSetupMetadata:
         assert exported['credentials'] == account['credentials']
         assert exported['managedAccountId'] == account['managedAccountId']
 
+    @pytest.mark.parametrize('slot', [None, 1, 2])
+    def test_managed_slot_refuses_add_token(self, temp_home, slot):
+        switcher = _linux_switcher(temp_home)
+        path = temp_home / 'managed.json'
+        payload = self.payload()
+        account = payload['accounts'][0]
+        path.write_text(json.dumps(payload))
+        import_accounts(switcher, str(path))
+        before = switcher._get_sequence_data()
+        with pytest.raises(ConfigError, match='Managed accounts.*import'):
+            switcher.add_account_from_token(token='sk-ant-oat01-fixture-old', email=account['email'], slot=slot, assume_yes=True)
+        assert switcher._get_sequence_data() == before
+        export_accounts(switcher, str(path))
+        assert json.loads(path.read_text())['accounts'][0]['credentials'] == account['credentials']
+
+    def test_add_token_rechecks_import_after_slot_selection(self, temp_home):
+        switcher = _linux_switcher(temp_home)
+        payload = self.payload()
+        path = temp_home / 'managed.json'
+        path.write_text(json.dumps(payload))
+        choose = switcher._get_next_account_number
+        def choose_then_import():
+            selected = choose()
+            import_accounts(switcher, str(path))
+            return selected
+        with patch.object(switcher, '_get_next_account_number', side_effect=choose_then_import):
+            with pytest.raises(ConfigError, match='Managed accounts.*import'):
+                switcher.add_account_from_token(token='sk-ant-oat01-fixture-old', email='personal@token.local')
+        export_accounts(switcher, str(path))
+        assert json.loads(path.read_text())['accounts'][0]['credentials'] == payload['accounts'][0]['credentials']
+
+    @pytest.mark.parametrize('writer', ['write_account_credentials', 'persist_backup_credentials', 'profile'])
+    def test_managed_slot_refuses_legacy_backup_writers(self, temp_home, writer):
+        switcher = _linux_switcher(temp_home)
+        path = temp_home / 'managed.json'
+        payload = self.payload()
+        account = payload['accounts'][0]
+        path.write_text(json.dumps(payload))
+        import_accounts(switcher, str(path))
+        old = json.dumps({'claudeAiOauth': {'accessToken': 'sk-ant-oat01-fixture-old'}})
+        if writer == 'profile':
+            with patch('claude_swap.session.profile_is_quiescent', return_value=True), patch.object(switcher, '_session_profile_ahead', return_value=old):
+                assert switcher._adopt_session_credential('1', account['email'], '') is False
+        else:
+            with pytest.raises(ConfigError, match='Managed accounts.*import'):
+                getattr(switcher, writer)('1', account['email'], old)
+        export_accounts(switcher, str(path))
+        assert json.loads(path.read_text())['accounts'][0]['credentials'] == account['credentials']
+
     def test_managed_slot_refuses_live_rotation_resync(self, temp_home):
         switcher = _linux_switcher(temp_home)
         path = temp_home / 'managed.json'

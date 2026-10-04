@@ -500,3 +500,55 @@ and the two source integration tests were independently confirmed. The fork has 
 configured CI; local focused/syntax/whitespace checks are the current source evidence.
 The earlier installed wheel predates this correction and must be rebuilt/reaccepted.
 No all-writer exclusion, native Keychain, operating recovery or release acceptance is claimed.
+
+
+### Additional adjacent-writer follow-up on b6c7fce — 2026-10-04
+
+Status: source/tests complete; this additional diff awaits parent review/commit/push.
+The preceding parent acceptance record is preserved and applies to its earlier HEAD.
+No broader audit was continued after the parent's stop-scope instruction.
+
+Newly confirmed gaps (three groups; six initial RED cases):
+
+- **P1 — add-token can overwrite or remove managed generation ownership.** The bare,
+  same-slot and move-slot commands accepted synthetic old bytes against an imported
+  managed account. All three RED cases now reject before mutation. Both add-token
+  commits hold FileLock and repeat the shared source/target check; an additional test
+  inserts a real import after free-slot selection and confirms the target survives.
+- **P2 — session-profile adoption lacked a managed metadata fence.** Given a quiescent
+  profile considered ahead by the existing profile resolver, the direct store write
+  replaced managed bytes. The conditional writer regression supplies those two
+  eligibility decisions synthetically; it does not reproduce a full profile lifecycle
+  or claim that an ordinary stale-marked G1 profile passes the existing checks.
+  Adoption now returns false for managed slots under its existing lock.
+- **P2 — legacy persistence entry points lacked a managed metadata fence.** Direct
+  invocations of `write_account_credentials` and `persist_backup_credentials` replaced
+  imported bytes. Both now reject with ConfigError. No current production caller of
+  either public wrapper was found in repository source; this is a latent API-boundary
+  gap, not evidence of an exercised CLI route. The first wrapper retains its documented
+  caller-held-lock requirement; the latter owns its FileLock.
+
+The existing add-account and resync checks now share `_managed_backup_conflict` /
+`_refuse_managed_capture` with these confirmed paths. The lower-level import writer and
+transfer validation were not changed. Forward-generation import/rollback and ordinary
+config-only switch backup remain intact and pass existing transfer/integration tests.
+Other refresh paths were not changed or certified by this follow-up; this is still not
+an all-writer or external-writer exclusion claim.
+
+Verification: **661 passed** in selected transfer/switcher/token-runtime files, including
+seven new tests (six RED -> GREEN writer cases plus the import-interleaving regression).
+The initial shared predicate exposed eight existing uninitialized-store tests; handling
+`_get_sequence_data() is None` restored compatibility and the final 661 all passed.
+Happy's explicit fallback regressions and related files: **473 passed**, source
+integration: **2 passed**, TypeScript check passed. Both changed Python files pass
+in-memory compile, and diff whitespace checks pass. Ruff remains unavailable; no lint
+pass is claimed and no dependency was installed. These counts replace the prior
+472/2/654 for this additional diff, not add to them.
+
+Only synthetic/file-backed credentials and mocked/offline transports were used.
+No real .env/Keychain, inference, operating daemon/DB/services/signers/pins, release,
+commit or push. `automaticRotation:false`, `externalWriterExclusion:false`, unknown
+coverage and unsupported published .279 downgrade remain unchanged.
+
+
+Parent follow-up acceptance (2026-10-04): Parent independently reviewed the shared guard, both add-token commit locks and profile/public-wrapper guards; the seven new adjacent-writer regressions passed. Current PR head/checks own the final CI result. Previous installed artifacts still require rebuild/reacceptance.

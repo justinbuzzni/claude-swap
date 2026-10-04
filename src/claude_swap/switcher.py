@@ -820,6 +820,21 @@ class ClaudeAccountSwitcher:
     def _read_account_credentials(self, account_num: str, email: str) -> str:
         return self._store._read_account_credentials(account_num, email)
 
+    def _managed_backup_conflict(
+        self, target: str | None, email: str | None = None, org_uuid: str = ""
+    ) -> bool:
+        """Legacy capture/refresh cannot replace an import-owned source or target."""
+        return any(record.get("managedAccountId") and (
+            number == target or (email is not None and record.get("email") == email
+                                 and (record.get("organizationUuid") or "") == org_uuid)
+        ) for number, record in (self._get_sequence_data() or {}).get("accounts", {}).items())
+
+    def _refuse_managed_capture(
+        self, target: str | None, email: str | None = None, org_uuid: str = ""
+    ) -> None:
+        if self._managed_backup_conflict(target, email, org_uuid):
+            raise ConfigError("Managed accounts must be updated through import")
+
     def _write_account_credentials(
         self, account_num: str, email: str, credentials: str
     ) -> None:
@@ -1720,6 +1735,7 @@ class ClaudeAccountSwitcher:
         list_accounts() — FileLock is not re-entrant across instances in one
         process (see the v0.7.3 deadlock history).
         """
+        self._refuse_managed_capture(account_num)
         self._write_account_credentials(account_num, email, credentials)
 
     def read_account_config(self, account_num: str, email: str) -> str:
@@ -1981,6 +1997,7 @@ class ClaudeAccountSwitcher:
         hold ``self.lock_file`` (FileLock is non-reentrant).
         """
         with FileLock(self.lock_file):
+            self._refuse_managed_capture(account_num)
             self._write_account_credentials(account_num, email, credentials)
 
     def account_identity(self, account_num: str) -> dict:
@@ -2876,6 +2893,8 @@ class ClaudeAccountSwitcher:
 
         session_dir = self._session_dir(account_num, email)
         with FileLock(self.lock_file):
+            if self._managed_backup_conflict(account_num):
+                return False
             if not profile_is_quiescent(session_dir):
                 return False
             profile = self._session_profile_ahead(account_num, email, org_uuid)
@@ -3538,16 +3557,7 @@ class ClaudeAccountSwitcher:
 
         # Live capture cannot refresh, move or replace an import-owned slot:
         # the live login may still carry G1 after G2 was imported.
-        def refuse_managed_capture(target: str | None) -> None:
-            accounts = self._get_sequence_data().get("accounts", {})
-            if any(record.get("managedAccountId") and (
-                (record.get("email") == current_email
-                 and (record.get("organizationUuid") or "") == current_org_uuid)
-                or number == target
-            ) for number, record in accounts.items()):
-                raise ConfigError("Managed accounts must be updated through import")
-
-        refuse_managed_capture(str(slot) if slot is not None else None)
+        self._refuse_managed_capture(str(slot) if slot is not None else None, current_email, current_org_uuid)
 
         # When no slot specified and account already exists, refresh credentials in place
         if slot is None and self._account_exists(current_email, current_org_uuid):
@@ -3596,7 +3606,7 @@ class ClaudeAccountSwitcher:
             self._reject_identity_drift_since_verify(identity)
 
             with FileLock(self.lock_file):
-                refuse_managed_capture(account_num)
+                self._refuse_managed_capture(account_num, current_email, current_org_uuid)
                 seq = self._get_sequence_data()
                 self._write_account_credentials(account_num, current_email, current_creds)
                 self._write_account_config(account_num, current_email, current_config)
@@ -3721,7 +3731,7 @@ class ClaudeAccountSwitcher:
         self._reject_identity_drift_since_verify(identity)
 
         with FileLock(self.lock_file):
-            refuse_managed_capture(account_num)
+            self._refuse_managed_capture(account_num, current_email, current_org_uuid)
             # Now safe to perform destructive cleanup (new account data is in memory)
             if displace_slot:
                 d_num, d_email, d_org = displace_slot
@@ -3835,6 +3845,7 @@ class ClaudeAccountSwitcher:
         # identity is matched on (email, org) only, so an api-key and an OAuth
         # account sharing an email would be indistinguishable at switch time.
         self._reject_cross_kind_collision(email, is_api_key)
+        self._refuse_managed_capture(str(slot) if slot is not None else None, email)
 
         # Build the credential payload by kind: a managed key is stored raw; an
         # OAuth setup-token is wrapped in Claude Code's credential JSON. The
@@ -3865,17 +3876,20 @@ class ClaudeAccountSwitcher:
                 raise ConfigError(
                     f"Existing account metadata for {email} is inconsistent"
                 )
-            self._write_account_credentials(account_num, email, credentials)
-            self._write_account_config(account_num, email, config)
-            # A refreshed credential invalidates any dead-token quarantine on this
-            # slot (mirrors ``add_account``); otherwise the stale strike row keeps
-            # the account stuck at "re-login needed" and it never fetches the new
-            # token. Token accounts are always personal, so org is "".
-            self._usage_store.clear_dead_token(
-                [account_num], {account_num: (email, "")}
-            )
-            seq["lastUpdated"] = get_timestamp()
-            self._write_json(self.sequence_file, seq)
+            with FileLock(self.lock_file):
+                self._refuse_managed_capture(account_num, email)
+                seq = self._get_sequence_data()
+                self._write_account_credentials(account_num, email, credentials)
+                self._write_account_config(account_num, email, config)
+                # A refreshed credential invalidates any dead-token quarantine on this
+                # slot (mirrors ``add_account``); otherwise the stale strike row keeps
+                # the account stuck at "re-login needed" and it never fetches the new
+                # token. Token accounts are always personal, so org is "".
+                self._usage_store.clear_dead_token(
+                    [account_num], {account_num: (email, "")}
+                )
+                seq["lastUpdated"] = get_timestamp()
+                self._write_json(self.sequence_file, seq)
             kind_label = "API key" if is_api_key else "token"
             self._logger.info(f"Updated {kind_label} for account {account_num}: {email}")
             print(
@@ -3930,54 +3944,56 @@ class ClaudeAccountSwitcher:
         else:
             account_num = str(self._get_next_account_number())
 
-        if displace_slot:
-            d_num, d_email, d_org = displace_slot
-            self._delete_account_files(d_num, d_email)
+        with FileLock(self.lock_file):
+            self._refuse_managed_capture(account_num, email)
+            if displace_slot:
+                d_num, d_email, d_org = displace_slot
+                self._delete_account_files(d_num, d_email)
+                data = self._get_sequence_data()
+                if int(d_num) in data["sequence"]:
+                    data["sequence"].remove(int(d_num))
+                del data["accounts"][d_num]
+                self._write_json(self.sequence_file, data)
+                self._prune_mappings(d_email, d_org)
+
+            if migrate_from:
+                data = self._get_sequence_data()
+                old_email = data["accounts"][migrate_from].get("email", "")
+                self._delete_account_files(migrate_from, old_email)
+                if int(migrate_from) in data["sequence"]:
+                    data["sequence"].remove(int(migrate_from))
+                del data["accounts"][migrate_from]
+                self._write_json(self.sequence_file, data)
+
+            self._write_account_credentials(account_num, email, credentials)
+            self._write_account_config(account_num, email, config)
+            # Reusing/overwriting a slot with a fresh credential lifts any dead-token
+            # quarantine carried by that slot's prior lineage (mirrors ``add_account``).
+            self._usage_store.clear_dead_token(
+                [account_num], {account_num: (email, "")}
+            )
+
             data = self._get_sequence_data()
-            if int(d_num) in data["sequence"]:
-                data["sequence"].remove(int(d_num))
-            del data["accounts"][d_num]
+            previous = data.get("accounts", {}).get(account_num, {})
+            record = {
+                "runtimeAccountRef": previous.get("runtimeAccountRef") or str(uuid4()),
+                "email": email,
+                "uuid": "",
+                "organizationUuid": "",
+                "organizationName": "",
+                "added": get_timestamp(),
+            }
+            if token.startswith("sk-ant-oat01-"):
+                record["credentialType"] = "setup_token"
+            if is_api_key:
+                record["kind"] = "api_key"
+            data["accounts"][account_num] = record
+            if int(account_num) not in data["sequence"]:
+                data["sequence"].append(int(account_num))
+                data["sequence"].sort()
+            data["lastUpdated"] = get_timestamp()
+
             self._write_json(self.sequence_file, data)
-            self._prune_mappings(d_email, d_org)
-
-        if migrate_from:
-            data = self._get_sequence_data()
-            old_email = data["accounts"][migrate_from].get("email", "")
-            self._delete_account_files(migrate_from, old_email)
-            if int(migrate_from) in data["sequence"]:
-                data["sequence"].remove(int(migrate_from))
-            del data["accounts"][migrate_from]
-            self._write_json(self.sequence_file, data)
-
-        self._write_account_credentials(account_num, email, credentials)
-        self._write_account_config(account_num, email, config)
-        # Reusing/overwriting a slot with a fresh credential lifts any dead-token
-        # quarantine carried by that slot's prior lineage (mirrors ``add_account``).
-        self._usage_store.clear_dead_token(
-            [account_num], {account_num: (email, "")}
-        )
-
-        data = self._get_sequence_data()
-        previous = data.get("accounts", {}).get(account_num, {})
-        record = {
-            "runtimeAccountRef": previous.get("runtimeAccountRef") or str(uuid4()),
-            "email": email,
-            "uuid": "",
-            "organizationUuid": "",
-            "organizationName": "",
-            "added": get_timestamp(),
-        }
-        if token.startswith("sk-ant-oat01-"):
-            record["credentialType"] = "setup_token"
-        if is_api_key:
-            record["kind"] = "api_key"
-        data["accounts"][account_num] = record
-        if int(account_num) not in data["sequence"]:
-            data["sequence"].append(int(account_num))
-            data["sequence"].sort()
-        data["lastUpdated"] = get_timestamp()
-
-        self._write_json(self.sequence_file, data)
         source_label = "API key" if is_api_key else "token"
         self._logger.info(f"Added account {account_num} from {source_label}: {email}")
         if migrate_from:
@@ -4771,7 +4787,7 @@ class ClaudeAccountSwitcher:
             ):
                 # A profile verdict attributes identity, not managed generation.
                 # Check under the import/switch lock before any live-to-backup write.
-                if self._get_sequence_data().get("accounts", {}).get(account_num, {}).get("managedAccountId"):
+                if self._managed_backup_conflict(account_num):
                     return
                 # Identity re-check under the lock: a switch/login landing in
                 # the gap means the live store is no longer this account's.
