@@ -7,19 +7,19 @@ Multi-account switcher for Claude Code. Easily switch between multiple Claude ac
 ### Using uv (recommended)
 
 ```bash
-uv tool install claude-swap
+uv tool install saycode-claude-swap
 ```
 
 ### Using pipx
 
 ```bash
-pipx install claude-swap
+pipx install saycode-claude-swap
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/realiti4/claude-swap.git
+git clone https://github.com/justinbuzzni/claude-swap.git
 cd claude-swap
 uv sync
 uv run cswap help
@@ -30,8 +30,8 @@ uv run cswap help
 ```bash
 cswap upgrade          # uv/pipx installs on macOS/Linux: auto-detects and upgrades
 # or run your installer directly:
-uv tool upgrade claude-swap
-pipx upgrade claude-swap
+uv tool upgrade saycode-claude-swap
+pipx upgrade saycode-claude-swap
 ```
 
 ## Usage
@@ -242,7 +242,7 @@ On Linux/WSL, set `XDG_DATA_HOME` to override the default location.
 Needs the `menubar` extra (macOS only):
 
 ```bash
-uv tool install 'claude-swap[menubar]'   # or: pipx install 'claude-swap[menubar]'
+uv tool install 'saycode-claude-swap[menubar]'   # or: pipx install 'saycode-claude-swap[menubar]'
 cswap menubar
 ```
 
@@ -388,9 +388,9 @@ cswap purge
 Then uninstall the tool:
 
 ```bash
-uv tool uninstall claude-swap
+uv tool uninstall saycode-claude-swap
 # or
-pipx uninstall claude-swap
+pipx uninstall saycode-claude-swap
 ```
 
 ## Requirements

@@ -127,7 +127,9 @@ def slot_identity(data: dict, slot: str | None) -> list[str] | None:
 
 def durable_write_json(path: Path, value: dict) -> None:
     atomic_write_json(path, value)
-    with path.open('rb') as saved:
+    # Windows rejects fsync on a read-only handle; use a writable handle
+    # for the same durable-file barrier on every platform.
+    with path.open('r+b') as saved:
         os.fsync(saved.fileno())
     if os.name != 'nt':
         directory = os.open(path.parent, os.O_RDONLY)

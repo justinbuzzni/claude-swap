@@ -1,4 +1,4 @@
-"""Check PyPI for newer versions of claude-swap."""
+"""Check PyPI for newer versions of saycode-claude-swap."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from claude_swap.cache import CACHE_DIR, MISSING, read_cache, write_cache
 
 CACHE_PATH = CACHE_DIR / "update_check.json"
 CACHE_TTL = 24 * 3600  # 24 hours
-PYPI_URL = "https://pypi.org/pypi/claude-swap/json"
+PYPI_URL = "https://pypi.org/pypi/saycode-claude-swap/json"
 
 _VERSION_RE = re.compile(
     r"(\d+(?:\.\d+)*)(?:[-_.]?(alpha|beta|preview|pre|rc|a|b|c)[-_.]?(\d+)?)?",
@@ -117,8 +117,8 @@ def check_for_update(current_version: str) -> str | None:
         if latest_version and _is_newer(latest_version, current_version):
             method = _detect_install_method()
             direct = {
-                "uv": "uv tool upgrade claude-swap",
-                "pipx": "pipx upgrade claude-swap",
+                "uv": "uv tool upgrade saycode-claude-swap",
+                "pipx": "pipx upgrade saycode-claude-swap",
             }.get(method or "")
             if direct and sys.platform != "win32":
                 # cswap upgrade actually performs the upgrade here.
@@ -130,7 +130,7 @@ def check_for_update(current_version: str) -> str | None:
                 # Unknown install method: cswap upgrade shows manual instructions.
                 hint = "Run `cswap upgrade` for upgrade instructions."
             return (
-                f"A newer version of claude-swap is available ({latest_version}). "
+                f"A newer version of saycode-claude-swap is available ({latest_version}). "
                 f"You are using {current_version}. {hint}"
             )
         return None
@@ -148,8 +148,8 @@ def run_self_upgrade() -> int:
 
     method = _detect_install_method()
     commands = {
-        "uv": ["uv", "tool", "upgrade", "claude-swap"],
-        "pipx": ["pipx", "upgrade", "claude-swap"],
+        "uv": ["uv", "tool", "upgrade", "saycode-claude-swap"],
+        "pipx": ["pipx", "upgrade", "saycode-claude-swap"],
     }
     cmd = commands.get(method or "")
     if cmd is None:
@@ -158,9 +158,9 @@ def run_self_upgrade() -> int:
             f"  sys.prefix:     {sys.prefix}\n"
             f"  sys.executable: {sys.executable}\n"
             "To upgrade manually, run one of:\n"
-            "  uv tool upgrade claude-swap\n"
-            "  pipx upgrade claude-swap\n"
-            f"  {sys.executable} -m pip install --upgrade claude-swap\n"
+            "  uv tool upgrade saycode-claude-swap\n"
+            "  pipx upgrade saycode-claude-swap\n"
+            f"  {sys.executable} -m pip install --upgrade saycode-claude-swap\n"
             "If you installed with `pip install -e .`, use `git pull` instead."
         )
         return 1
@@ -170,7 +170,7 @@ def run_self_upgrade() -> int:
     # though the package itself updates. cswap exits right after this, which
     # releases the lock, so the user can just run the command themselves.
     if sys.platform == "win32":
-        print(f"To upgrade claude-swap on Windows, run:\n  {accent(' '.join(cmd))}")
+        print(f"To upgrade saycode-claude-swap on Windows, run:\n  {accent(' '.join(cmd))}")
         return 1
 
     try:

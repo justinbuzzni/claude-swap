@@ -496,13 +496,13 @@ def framework_build_warning(
 
     if install_method == "uv":
         remedy = (
-            "  uv tool install --managed-python --force 'claude-swap[menubar]'"
+            "  uv tool install --managed-python --force 'saycode-claude-swap[menubar]'"
         )
     elif install_method == "pipx":
         remedy = (
             "  Reinstall against a non-framework interpreter, e.g. one from "
             "`uv python install 3.13`:\n"
-            "  pipx install --force --python <that python> 'claude-swap[menubar]'"
+            "  pipx install --force --python <that python> 'saycode-claude-swap[menubar]'"
         )
     else:
         remedy = (
@@ -537,7 +537,7 @@ def run(switcher) -> int:
         # error type the CLI already renders cleanly instead of a traceback.
         raise ClaudeSwitchError(
             "Menu bar mode requires 'rumps'. "
-            "Install with: pip install 'claude-swap[menubar]'"
+            "Install with: pip install 'saycode-claude-swap[menubar]'"
         ) from e
 
     # rumps never sets an activation policy, so under a framework Python the

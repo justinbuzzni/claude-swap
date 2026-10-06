@@ -162,7 +162,9 @@ class TokenRuntime:
     def _save(self, state):
         atomic_write_json(self.state_file, state)
         # A reservation must reach stable storage before credential transport.
-        with self.state_file.open('rb') as saved:
+        # Windows rejects fsync on a read-only handle; use a writable handle
+        # for the same durable-file barrier on every platform.
+        with self.state_file.open('r+b') as saved:
             os.fsync(saved.fileno())
         if os.name != 'nt':
             directory = os.open(self.state_file.parent, os.O_RDONLY)
