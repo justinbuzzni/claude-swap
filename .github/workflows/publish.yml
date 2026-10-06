@@ -3,6 +3,12 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version to publish (must match pyproject.toml)"
+        required: true
+        type: string
 
 jobs:
   publish:
@@ -12,6 +18,38 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve release version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          set -eu
+          if [ -n "${RELEASE_TAG}" ]; then
+            version="${RELEASE_TAG#v}"
+          else
+            version="${DISPATCH_VERSION}"
+          fi
+          test -n "${version}"
+          echo "value=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify package version
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -eu
+          actual="$(python - <<'PY'
+          import pathlib, re
+
+          text = pathlib.Path("pyproject.toml").read_text()
+          match = re.search(r'^version\\s*=\\s*[\"\\\']([^\"\\\']+)[\"\\\']$', text, re.MULTILINE)
+          if match is None:
+              raise SystemExit("pyproject.toml version is missing")
+          print(match.group(1))
+          PY
+          )"
+          test "${actual}" = "${EXPECTED_VERSION}"
 
       - name: Set up Python
         uses: actions/setup-python@v5
