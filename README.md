@@ -242,7 +242,7 @@ On Linux/WSL, set `XDG_DATA_HOME` to override the default location.
 Needs the `menubar` extra (macOS only):
 
 ```bash
-uv tool install 'claude-swap[menubar]'   # or: pipx install 'claude-swap[menubar]'
+uv tool install 'saycode-claude-swap[menubar]'   # or: pipx install 'saycode-claude-swap[menubar]'
 cswap menubar
 ```
 
@@ -390,7 +390,7 @@ Then uninstall the tool:
 ```bash
 uv tool uninstall saycode-claude-swap
 # or
-pipx uninstall claude-swap
+pipx uninstall saycode-claude-swap
 ```
 
 ## Requirements
