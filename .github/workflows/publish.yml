@@ -43,7 +43,7 @@ jobs:
           import pathlib, re
 
           text = pathlib.Path("pyproject.toml").read_text()
-          match = re.search(r'^version\\s*=\\s*[\"\\\']([^\"\\\']+)[\"\\\']$', text, re.MULTILINE)
+          match = re.search(r'^version\s*=\s*[\"\']([^\"\']+)[\"\']$', text, re.MULTILINE)
           if match is None:
               raise SystemExit("pyproject.toml version is missing")
           print(match.group(1))
