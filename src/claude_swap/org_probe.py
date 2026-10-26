@@ -7,6 +7,11 @@ from claude_swap.locking import FileLock
 from claude_swap.token_probe import probe
 from claude_swap.token_runtime import ARTIFACT, _timestamp
 
+PERMIT_FIELDS = {'version', 'permitId', 'companyId', 'machineId', 'managedAccountId', 'credentialGeneration', 'policyRevision', 'reservedAt', 'transportDeadline', 'expiresAt', 'timeoutMs', 'accountRemaining', 'companyRemaining'}
+ACCOUNT_LIMIT, MACHINE_LIMIT = 96, 288
+# A check of a candidate before a session switches onto it may spend up to twice the daily budget.
+SWITCH_BUDGET_FACTOR = 2
+
 
 def collect_org(runtime, request):
     def stopped(reason):
@@ -17,7 +22,7 @@ def collect_org(runtime, request):
         context, permit = request['context'], request['permit']
         if set(context) != {'companyId', 'machineId', 'managedAccountId', 'credentialGeneration', 'policyRevision', 'accountRef'}:
             raise ValueError
-        if set(permit) != {'version', 'permitId', 'companyId', 'machineId', 'managedAccountId', 'credentialGeneration', 'policyRevision', 'reservedAt', 'transportDeadline', 'expiresAt', 'timeoutMs', 'accountRemaining', 'companyRemaining'}:
+        if set(permit) - {'purpose'} != PERMIT_FIELDS or permit.get('purpose', 'switch') != 'switch':
             raise ValueError
         uuid.UUID(permit['permitId'])
         uuid.UUID(context['managedAccountId'])
@@ -68,7 +73,8 @@ def collect_org(runtime, request):
             token_state = state['tokens'].get(digest, {})
             if now < token_state.get('nextAt', 0):
                 return stopped('backing_off')
-            if len(state['attempts']) >= 288 or sum(a['digest'] == digest for a in state['attempts']) >= 96:
+            factor = SWITCH_BUDGET_FACTOR if permit.get('purpose') == 'switch' else 1
+            if len(state['attempts']) >= MACHINE_LIMIT*factor or sum(a['digest'] == digest for a in state['attempts']) >= ACCOUNT_LIMIT*factor:
                 return stopped('budget_exhausted')
             snapshot = (digest, account['generation'], account['scope'])
             permits[permit_hash] = permit['expiresAt']

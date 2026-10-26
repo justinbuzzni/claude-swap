@@ -165,3 +165,51 @@ def test_future_retry_after_is_kept(setup):
     runtime, request = setup
     with patch('claude_swap.org_probe.probe', return_value=dict(observation(), reason='throttled', retryAt=iso(NOW + 120))):
         assert collect_org(runtime, request)['observation']['retryAt'] == iso(NOW + 120)
+
+
+def spent(runtime, request, count):
+    """Recent attempts on this account's token, as earlier collections left them."""
+    state = runtime._load()
+    runtime._sync(state)
+    digest = state['accounts'][request['context']['accountRef']]['digest']
+    state['attempts'] = [{'at': NOW-60, 'digest': digest} for _ in range(count)]
+    state['tokens'] = {}
+    runtime._save(state)
+
+
+def switch(request):
+    request['permit']['purpose'] = 'switch'
+    return request
+
+
+def test_switch_check_may_spend_up_to_twice_the_account_budget(setup):
+    runtime, request = setup
+    assert capabilities()['switchProbeVersion'] == 1
+    spent(runtime, request, 96)
+    with patch('claude_swap.org_probe.probe', return_value=observation()) as http:
+        assert collect_org(runtime, request)['reason'] == 'budget_exhausted'
+        assert 'observation' in collect_org(runtime, switch(copy.deepcopy(request)))
+        http.assert_called_once()
+    spent(runtime, request, 192)
+    request['permit']['permitId'] = '33333333-3333-4333-8333-333333333333'
+    with patch('claude_swap.org_probe.probe') as http:
+        assert collect_org(runtime, switch(request))['reason'] == 'budget_exhausted'
+        http.assert_not_called()
+
+
+def test_switch_check_may_spend_up_to_twice_the_machine_budget(setup):
+    runtime, request = setup
+    state = runtime._load()
+    state['attempts'] = [{'at': NOW-60, 'digest': 'another-token'} for _ in range(288)]
+    runtime._save(state)
+    with patch('claude_swap.org_probe.probe', return_value=observation()):
+        assert collect_org(runtime, copy.deepcopy(request))['reason'] == 'budget_exhausted'
+        assert 'observation' in collect_org(runtime, switch(request))
+
+
+def test_unknown_purpose_never_calls(setup):
+    runtime, request = setup
+    request['permit']['purpose'] = 'periodic'
+    with patch('claude_swap.org_probe.probe') as http:
+        assert collect_org(runtime, request)['reason'] == 'grant_invalid'
+        http.assert_not_called()
