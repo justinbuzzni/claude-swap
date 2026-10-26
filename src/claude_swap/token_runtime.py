@@ -42,7 +42,7 @@ def capabilities():
     # automaticRotation stays false: no production observation proves model
     # coverage, so the controller can never find an eligible candidate.
     return dict(version=1, artifact=ARTIFACT, setupTokenObservation=True,
-                managedAccountMetadata=True, durableProbeBudget=True, organizationCollectorVersion=1, personalProbeVersion=1,
+                managedAccountMetadata=True, durableProbeBudget=True, organizationCollectorVersion=1, switchProbeVersion=1, personalProbeVersion=1,
                 rotationSuggestion=True, automaticRotation=False,
                 rotationWriterOwnership=True, rotationReceipt=True,
                 rotationController=True, externalWriterExclusion=False)
