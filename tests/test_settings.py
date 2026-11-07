@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import stat
 import sys
 from pathlib import Path
@@ -37,6 +38,25 @@ def _args(**kwargs) -> argparse.Namespace:
     }
     defaults.update(kwargs)
     return argparse.Namespace(**defaults)
+
+
+def test_atomic_json_finishes_partial_writes(tmp_path, monkeypatch):
+    write = os.write
+    monkeypatch.setattr(os, "write", lambda fd, data: write(fd, data[:4096]))
+    payload = {"accounts": {str(n): "계정" * 800 for n in range(7)}}
+    path = tmp_path / "runtime.json"
+    atomic_write_json(path, payload)
+    assert json.loads(path.read_text()) == payload
+
+
+def test_atomic_json_preserves_original_when_writing_stops(tmp_path, monkeypatch):
+    path = tmp_path / "runtime.json"
+    path.write_text('{"version": 1}')
+    monkeypatch.setattr(os, "write", lambda fd, data: 0)
+    with pytest.raises(OSError):
+        atomic_write_json(path, {"replacement": True})
+    assert json.loads(path.read_text()) == {"version": 1}
+    assert list(tmp_path.glob("*.tmp")) == []
 
 
 class TestLoadSettings:

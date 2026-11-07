@@ -472,7 +472,12 @@ def atomic_write_json(path: Path, data: dict) -> None:
         os.chmod(path.parent, 0o700)
     fd, tmp_path = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
     try:
-        os.write(fd, json.dumps(data, indent=2).encode("utf-8"))
+        remaining = memoryview(json.dumps(data, indent=2).encode("utf-8"))
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                raise OSError("JSON write made no progress")
+            remaining = remaining[written:]
         os.close(fd)
         fd = -1
         replace_with_retry(tmp_path, str(target))
