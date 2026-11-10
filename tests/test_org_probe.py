@@ -213,3 +213,190 @@ def test_unknown_purpose_never_calls(setup):
     with patch('claude_swap.org_probe.probe') as http:
         assert collect_org(runtime, request)['reason'] == 'grant_invalid'
         http.assert_not_called()
+
+
+def test_new_organization_permit_rechecks_long_provider_backoff_hourly_without_resetting_spending(setup):
+    runtime, request = setup
+    with patch('claude_swap.org_probe.probe', return_value=dict(observation(), reason='throttled', retryAt=iso(NOW + 4 * 86400))) as http:
+        assert 'observation' in collect_org(runtime, request)
+    assert runtime.status()['budget']['machineUsed24h'] == 1
+    request = copy.deepcopy(request)
+    request['permit']['permitId'] = '44444444-4444-4444-8444-444444444444'
+    def at(seconds):
+        runtime.clock = lambda: NOW + seconds
+        request['permit'].update(reservedAt=(NOW+seconds)*1000, transportDeadline=(NOW+seconds)*1000+10000, expiresAt=(NOW+seconds)*1000+30000)
+    at(3589)
+    with patch('claude_swap.org_probe.probe') as http:
+        assert collect_org(runtime, request)['reason'] == 'backing_off'
+        http.assert_not_called()
+    assert runtime.status()['budget']['machineUsed24h'] == 1
+    at(3600)
+    fresh = observation()
+    fresh['windows'][0]['resetsAt'] = iso(NOW + 7200)
+    with patch('claude_swap.org_probe.probe', return_value=fresh) as http:
+        assert 'observation' in collect_org(runtime, request)
+        assert collect_org(runtime, request)['reason'] == 'permit_replayed'
+        http.assert_called_once()
+    assert runtime.status()['budget']['machineUsed24h'] == 2
+
+
+def test_organization_retry_with_expired_attempt_history_can_recover_old_retry_after(setup):
+    runtime, request = setup
+    with patch('claude_swap.org_probe.probe', return_value=dict(observation(), reason='throttled', retryAt=iso(NOW + 7 * 86400))):
+        collect_org(runtime, request)
+    later = NOW + 2 * 86400
+    runtime.clock = lambda: later
+    request['permit'].update(permitId='44444444-4444-4444-8444-444444444444',reservedAt=later*1000,transportDeadline=later*1000+10000,expiresAt=later*1000+30000)
+    fresh = observation()
+    fresh['windows'][0]['resetsAt'] = iso(later + 1000)
+    with patch('claude_swap.org_probe.probe', return_value=fresh) as http:
+        assert 'observation' in collect_org(runtime, request)
+        http.assert_called_once()
+    assert runtime.status()['budget']['machineUsed24h'] == 1
+
+
+@pytest.mark.parametrize('limit', ['account', 'machine'])
+def test_hourly_organization_recheck_never_bypasses_durable_daily_budget(setup, limit):
+    runtime, request = setup
+    state = runtime._load()
+    runtime._sync(state)
+    digest = state['accounts'][request['context']['accountRef']]['digest']
+    state['tokens'][digest] = dict(nextAt=NOW+7*86400, failures=1)
+    state['attempts'] = [{'at': NOW-3600, 'digest': digest if limit == 'account' else 'another-token'} for _ in range(96 if limit == 'account' else 288)]
+    runtime._save(state)
+    with patch('claude_swap.org_probe.probe') as http:
+        assert collect_org(runtime, request)['reason'] == 'budget_exhausted'
+        http.assert_not_called()
+    assert len(runtime._load()['attempts']) == len(state['attempts'])
+
+
+@pytest.mark.parametrize('reason', ['timeout', 'headers_missing', 'coverage_unknown'])
+def test_failed_or_partial_hourly_probe_preserves_the_personal_provider_deadline(setup, reason):
+    runtime, request = setup
+    deadline = NOW + 4*86400
+    with patch('claude_swap.org_probe.probe', return_value=dict(observation(), reason='throttled', retryAt=iso(deadline))):
+        collect_org(runtime, request)
+    runtime.clock = lambda: NOW + 3600
+    request['permit'].update(permitId='44444444-4444-4444-8444-444444444444',reservedAt=(NOW+3600)*1000,transportDeadline=(NOW+3610)*1000,expiresAt=(NOW+3630)*1000)
+    fresh = observation()
+    fresh['windows'][0]['resetsAt'] = iso(NOW + 7200)
+    with patch('claude_swap.org_probe.probe', return_value=dict(fresh, reason=reason)):
+        assert 'observation' in collect_org(runtime, request)
+    assert all(entry['nextAt'] >= deadline for entry in runtime._load()['tokens'].values())
+
+
+def test_organization_hourly_exception_does_not_bypass_exponential_transport_backoff(setup):
+    runtime, request = setup
+    state = runtime._load()
+    runtime._sync(state)
+    digest = state['accounts'][request['context']['accountRef']]['digest']
+    state['attempts'] = [{'at': NOW-3600, 'digest': digest}]
+    state['tokens'][digest] = dict(nextAt=NOW+1200, failures=4)
+    runtime._save(state)
+    with patch('claude_swap.org_probe.probe') as http:
+        assert collect_org(runtime, request)['reason'] == 'backing_off'
+        http.assert_not_called()
+
+
+@pytest.mark.parametrize('outcome', ['full', 'crash', 'legacy-timeout'])
+def test_hourly_recheck_retains_provider_wait_durably_until_a_complete_success(setup, outcome):
+    runtime, request = setup
+    deadline = NOW + 4*86400
+    with patch('claude_swap.org_probe.probe', return_value=dict(observation(), reason='throttled', retryAt=iso(deadline))):
+        collect_org(runtime, request)
+    if outcome == 'legacy-timeout':
+        state = runtime._load()
+        for entry in state['tokens'].values(): entry.pop('orgRetryAt')
+        runtime._save(state)
+    runtime.clock = lambda: NOW + 3600
+    request['permit'].update(permitId='44444444-4444-4444-8444-444444444444',reservedAt=(NOW+3600)*1000,transportDeadline=(NOW+3610)*1000,expiresAt=(NOW+3630)*1000)
+    fresh = observation()
+    fresh['windows'] = [dict(kind=kind,pct=0,resetsAt=iso(NOW+7200),status=None) for kind in ['unified5h', 'unified7d']]
+    if outcome == 'crash':
+        with patch('claude_swap.org_probe.probe', side_effect=RuntimeError('fixture crash')):
+            with pytest.raises(RuntimeError, match='fixture crash'): collect_org(runtime, request)
+    else:
+        with patch('claude_swap.org_probe.probe', return_value=dict(fresh, reason='timeout') if outcome == 'legacy-timeout' else fresh):
+            assert 'observation' in collect_org(runtime, request)
+    token_state = next(iter(runtime._load()['tokens'].values()))
+    if outcome == 'full':
+        assert token_state['nextAt'] == NOW+3900
+        assert token_state['orgRetryAt'] == 0
+    else:
+        assert token_state['nextAt'] >= deadline
+        assert token_state['orgRetryAt'] == deadline
+    assert runtime.status()['budget']['machineUsed24h'] == 2
+
+
+def test_invalid_persisted_provider_deadline_stops_before_probe(setup):
+    runtime, request = setup
+    state = runtime._load()
+    runtime._sync(state)
+    digest = state['accounts'][request['context']['accountRef']]['digest']
+    state['tokens'][digest] = dict(nextAt=NOW+5000, orgRetryAt='bad', failures=1)
+    runtime._save(state)
+    with patch('claude_swap.org_probe.probe') as http:
+        with pytest.raises(ValueError): collect_org(runtime, request)
+        http.assert_not_called()
+
+
+def test_personal_throttle_after_org_success_still_allows_an_hourly_org_check(setup):
+    runtime, request = setup
+    with patch('claude_swap.org_probe.probe', return_value=observation()): collect_org(runtime, request)
+    runtime.switcher.add_account_from_token(token='sk-ant-oat01-org-fixture',email='personal@token.local')
+    alias = next(a['accountRef'] for a in runtime.status()['accounts'] if a['accountRef'] != request['context']['accountRef'])
+    runtime.consent(alias, enabled=True, ack_cost=True)
+    runtime.clock = lambda: NOW+300
+    with patch('claude_swap.token_runtime.probe', return_value=dict(observation(),reason='throttled',retryAt=iso(NOW+4*86400))):
+        assert runtime.collect(alias,in_use=True)['account']['reasonCodes'][0] == 'throttled'
+    runtime.clock = lambda: NOW+3900
+    request['permit'].update(permitId='44444444-4444-4444-8444-444444444444',reservedAt=(NOW+3900)*1000,transportDeadline=(NOW+3910)*1000,expiresAt=(NOW+3930)*1000)
+    with patch('claude_swap.org_probe.probe', return_value=observation()) as http:
+        assert 'observation' in collect_org(runtime,request)
+        http.assert_called_once()
+
+
+def test_provider_deadline_never_bypasses_an_active_transport_failure_deadline(setup):
+    runtime, request = setup
+    state=runtime._load(); runtime._sync(state)
+    digest=state['accounts'][request['context']['accountRef']]['digest']
+    state['tokens'][digest]=dict(nextAt=NOW+4*86400,orgRetryAt=NOW+4*86400,failures=7,transportFailures=6,transportRetryAt=NOW+1000)
+    state['attempts']=[dict(at=NOW-3600,digest=digest)]
+    runtime._save(state)
+    with patch('claude_swap.org_probe.probe',return_value=observation()) as http:
+        assert collect_org(runtime,request).get('reason')=='backing_off'
+        http.assert_not_called()
+
+
+def test_hourly_server_permit_tolerates_the_previous_transit_delay(setup):
+    runtime,request=setup
+    runtime.clock=lambda:NOW+9
+    with patch('claude_swap.org_probe.probe',return_value=dict(observation(),reason='throttled',retryAt=iso(NOW+4*86400))):collect_org(runtime,request)
+    runtime.clock=lambda:NOW+3600
+    request['permit'].update(permitId='44444444-4444-4444-8444-444444444444',reservedAt=(NOW+3600)*1000,transportDeadline=(NOW+3610)*1000,expiresAt=(NOW+3630)*1000)
+    with patch('claude_swap.org_probe.probe',return_value=observation()) as http:
+        assert 'observation' in collect_org(runtime,request)
+        http.assert_called_once()
+
+
+def test_repeated_transport_failures_under_a_provider_wait_back_off_beyond_hourly(setup):
+    import uuid
+    runtime,request=setup
+    with patch('claude_swap.org_probe.probe',return_value=dict(observation(),reason='throttled',retryAt=iso(NOW+4*86400))):collect_org(runtime,request)
+    def at(seconds):
+        runtime.clock=lambda:NOW+seconds
+        request['permit'].update(permitId=str(uuid.uuid4()),reservedAt=(NOW+seconds)*1000,transportDeadline=(NOW+seconds)*1000+10000,expiresAt=(NOW+seconds)*1000+30000)
+    for seconds in [3600,7200,10800,14400]:
+        at(seconds)
+        with patch('claude_swap.org_probe.probe',return_value=dict(observation(),reason='transport_failed')) as http:
+            assert 'observation' in collect_org(runtime,request)
+            http.assert_called_once()
+    at(18000)
+    with patch('claude_swap.org_probe.probe',return_value=observation()) as http:
+        assert collect_org(runtime,request)['reason']=='backing_off'
+        http.assert_not_called()
+    assert runtime.status()['budget']['machineUsed24h']==5
+    at(21600)
+    with patch('claude_swap.org_probe.probe',return_value=observation()) as http:
+        assert 'observation' in collect_org(runtime,request)
+        http.assert_called_once()

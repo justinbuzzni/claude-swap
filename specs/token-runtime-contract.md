@@ -552,3 +552,23 @@ coverage and unsupported published .279 downgrade remain unchanged.
 
 
 Parent follow-up acceptance (2026-10-04): Parent independently reviewed the shared guard, both add-token commit locks and profile/public-wrapper guards; the seven new adjacent-writer regressions passed. Current PR head/checks own the final CI result. Previous installed artifacts still require rebuild/reacceptance.
+
+
+## Authorized organization early-reset rechecks (2026-11-10)
+
+A valid fresh organization collector permit may recheck a provider Retry-After after
+one hour without an attempt on that digest. Ordinary exponential transport backoff
+is preserved, even when longer than an hour. Provider deadlines are persisted as
+validated orgRetryAt metadata owned by both the personal and organization writers.
+Independent validated transportFailures/transportRetryAt preserve repeated network
+backoff even while a provider deadline is active. The hourly local gate tolerates
+10 seconds of signed transport delivery variation; Studio still paces permits at
+one hour and all spending limits remain enforced. For pre-upgrade state, infer a provider wait only when
+it exceeds the largest ordinary personal cooldown for the recorded failure count
+(including jitter/transport), or when no attempt remains in the 24-hour ledger.
+The exception never clears spending, permit receipts, failures or the personal
+provider deadline on reservation, crash, failure or partial measurements. A successful
+full reading of both windows may release that deadline; failed rechecks preserve it.
+All grant context/time, custody, disabled state, lock and daily-budget checks remain.
+Offline fixtures cover timing, replay/budgets, aged/legacy state, failed/partial probe
+retention and transport backoff. No installed runtime or release pin is changed.

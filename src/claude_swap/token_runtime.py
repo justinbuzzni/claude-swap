@@ -151,8 +151,13 @@ class TokenRuntime:
                     raise ValueError
             for digest, token in state['tokens'].items():
                 next_at, failures = token['nextAt'], token.get('failures', 0)
+                org_retry = token.get('orgRetryAt', 0)
+                transport_retry, transport_failures = token.get('transportRetryAt', 0), token.get('transportFailures', 0)
                 if (not digest or type(next_at) not in (int, float) or not math.isfinite(next_at) or next_at < 0
-                        or type(failures) is not int or failures < 0):
+                        or type(failures) is not int or failures < 0
+                        or type(org_retry) not in (int, float) or not math.isfinite(org_retry) or org_retry < 0
+                        or type(transport_retry) not in (int, float) or not math.isfinite(transport_retry) or transport_retry < 0
+                        or type(transport_failures) is not int or transport_failures < 0):
                     raise ValueError
             return state
         except (ValueError, KeyError, TypeError, AttributeError):
@@ -353,7 +358,9 @@ class TokenRuntime:
                 retry = _timestamp(obs.get('retryAt')) or 0
                 # Jitter only lengthens the durable backoff; never below 5min.
                 delay = min(86400, 900 * 2 ** min(failures, 6)) * (1 + random.random() * .1)
-                token_state.update(nextAt=max(self.clock()+delay, retry), failures=failures)
+                token_state.update(nextAt=max(self.clock()+delay, retry), failures=failures, orgRetryAt=retry,
+                                   transportFailures=token_state.get('transportFailures',0)+1 if obs['reason'] not in ('coverage_unknown','throttled') else 0,
+                                   transportRetryAt=self.clock()+delay if obs['reason'] not in ('coverage_unknown','throttled') else 0)
                 if account is None or snapshot != (account['digest'], account['generation'], account['scope'], account['consentRevision']) or not account['consent']:
                     self._save(state)
                     return stopped('credential_changed')
