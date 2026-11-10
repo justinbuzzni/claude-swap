@@ -978,6 +978,14 @@ def _menubar_service(args) -> int:
 
 def main() -> None:
     """Main entry point for the CLI."""
+    if sys.argv[1:2] == ["oauth-owner"]:
+        from claude_swap.oauth_owner import command
+        try:
+            command(sys.argv[2:])
+        except (ClaudeSwitchError, ValueError, OSError):
+            print(json.dumps({"error": "CLAUDE_OWNER_REFRESH_FAILED"}))
+            sys.exit(1)
+        return
     if sys.argv[1:2] == ["token-runtime"]:
         from claude_swap.token_runtime import command
         try:

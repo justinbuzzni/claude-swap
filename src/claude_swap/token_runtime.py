@@ -41,7 +41,7 @@ def capabilities():
     # only detected at commit — consumers must stand their own writers down.
     # automaticRotation stays false: no production observation proves model
     # coverage, so the controller can never find an eligible candidate.
-    return dict(version=1, artifact=ARTIFACT, setupTokenObservation=True,
+    return dict(version=1, artifact=ARTIFACT, claudeRefreshOwnerVersion=1, setupTokenObservation=True,
                 managedAccountMetadata=True, durableProbeBudget=True, organizationCollectorVersion=1, switchProbeVersion=1, personalProbeVersion=1,
                 rotationSuggestion=True, automaticRotation=False,
                 rotationWriterOwnership=True, rotationReceipt=True,
