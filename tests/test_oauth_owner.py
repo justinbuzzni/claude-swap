@@ -188,3 +188,40 @@ def test_restoring_a_normal_source_backup_keeps_its_local_custody(temp_home):
     file = temp_home / 'backup.json'; file.write_text(json.dumps(payload))
     import_accounts(switcher, str(file), force=True)
     assert switcher._get_sequence_data()['accounts']['1']['oauthRefreshOwnerVersion'] == 1
+
+
+def _mixed_switcher(temp_home):
+    switcher = _linux_switcher(temp_home)
+    _seed_account(switcher, 1, 'a@example.com', creds={'claudeAiOauth': {
+        'accessToken': 'source-access', 'refreshToken': 'source-only', 'expiresAt': 1}})
+    _seed_account(switcher, 2, 'b@example.com', creds={'claudeAiOauth': {
+        'accessToken': 'target-only', 'expiresAt': 9999999999999, 'saycodeRefreshOwnerVersion': 1}})
+    return switcher
+
+
+def test_a_received_target_copy_does_not_block_exporting_the_own_source(temp_home):
+    from claude_swap.oauth_owner import source_export
+    switcher = _mixed_switcher(temp_home)
+    with patch.object(switcher, '_get_current_account', return_value=None):
+        payload = source_export(switcher)
+    assert [account['email'] for account in payload['accounts']] == ['a@example.com']
+    assert 'source-only' not in json.dumps(payload)
+    assert 'oauthRefreshOwnerVersion' not in switcher._get_sequence_data()['accounts']['2']
+
+
+def test_a_received_target_copy_does_not_block_refreshing_the_own_source(temp_home):
+    switcher = _mixed_switcher(temp_home)
+    refreshed = json.dumps({'claudeAiOauth': {
+        'accessToken': 'new-access', 'refreshToken': 'new-secret', 'expiresAt': 9999999999999}})
+
+    def consume(number, email, secret):
+        switcher._write_account_credentials(number, email, refreshed)
+        return oauth.RefreshOutcome(refreshed, None)
+
+    with patch.object(switcher, '_get_current_account', return_value=None), \
+            patch.object(switcher, '_live_session_pids', return_value=[]), \
+            patch.object(switcher, 'consume_backup_grant', side_effect=consume) as grant:
+        result = refresh_owner(switcher, threshold_ms=3600000)
+    assert [call.args[1] for call in grant.call_args_list] == ['a@example.com']
+    assert [account['email'] for account in result['accounts']] == ['a@example.com']
+    assert 'new-secret' not in json.dumps(result)

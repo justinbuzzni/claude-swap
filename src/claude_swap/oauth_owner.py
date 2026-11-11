@@ -67,6 +67,23 @@ def _export(switcher):
     return payload
 
 
+def _own_accounts(payload):
+    """Drop access-only copies received from another source; this PC never owns or re-exports them."""
+    kept = []
+    for account in payload['accounts']:
+        credentials = account.get('credentials')
+        data = credentials.get('claudeAiOauth') if isinstance(credentials, dict) else None
+        if not (isinstance(data, dict) and OWNER_FIELD in data):
+            kept.append(account)
+    if len(kept) != len(payload['accounts']):
+        if not any(isinstance(a.get('credentials'), dict) and (a['credentials'].get('claudeAiOauth') or {}).get('refreshToken') for a in kept):
+            raise ValueError('owner_source_required')
+        payload['accounts'] = kept
+        if payload.get('activeAccountNumber') not in {a['number'] for a in kept}:
+            payload['activeAccountNumber'] = None
+    return payload
+
+
 def _mark_sources(switcher, captured):
     sources = []
     for account in captured['accounts']:
@@ -96,7 +113,7 @@ def _mark_sources(switcher, captured):
 
 
 def source_export(switcher):
-    captured = _export(switcher)
+    captured = _own_accounts(_export(switcher))
     result = access_only(captured)
     _mark_sources(switcher, captured)
     return result
@@ -105,7 +122,7 @@ def source_export(switcher):
 def refresh_owner(switcher, *, threshold_ms=3600000):
     if type(threshold_ms) not in (int, float) or not 0 <= threshold_ms <= 86400000:
         raise ValueError('owner_threshold_invalid')
-    captured = _export(switcher)
+    captured = _own_accounts(_export(switcher))
     _mark_sources(switcher, captured)
     active = switcher._get_current_account()
     for account in captured['accounts']:
@@ -136,7 +153,7 @@ def refresh_owner(switcher, *, threshold_ms=3600000):
             outcome = switcher.consume_backup_grant(number, email, secret)
             if outcome.error or not outcome.credentials:
                 raise ValueError('owner_refresh_failed')
-    renewed = _export(switcher)
+    renewed = _own_accounts(_export(switcher))
     # Success is determined by the persisted credential, never a subprocess exit alone.
     expected = {(a['email'], a.get('organizationUuid') or '') for a in captured['accounts']}
     if expected != {(a['email'], a.get('organizationUuid') or '') for a in renewed['accounts']}:
