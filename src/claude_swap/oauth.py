@@ -163,6 +163,8 @@ def try_refresh_oauth_credentials(
     if not isinstance(data, dict):
         return RefreshOutcome(None, "transient")
     oauth = data.get("claudeAiOauth")
+    if isinstance(oauth, dict) and "saycodeRefreshOwnerVersion" in oauth:
+        return RefreshOutcome(None, "owner_refresh_required")
     if isinstance(oauth, dict) and not oauth.get("refreshToken"):
         access = oauth.get("accessToken")
         if isinstance(access, str) and access.startswith("sk-ant-oat01-"):
@@ -205,7 +207,7 @@ def try_refresh_oauth_credentials(
         )
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace") if hasattr(e, "read") else ""
-        _logger.debug("OAuth refresh failed: %r, body: %s", e, body[:500])
+        _logger.debug("OAuth refresh failed: HTTP %s", e.code)
         # Permanent only when the server itself rejected the grant: a 4xx AND
         # an explicit marker in the body. Anything ambiguous stays transient —
         # a misclassified transient costs one retry, a misclassified permanent

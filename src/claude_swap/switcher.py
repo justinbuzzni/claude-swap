@@ -3761,6 +3761,7 @@ class ClaudeAccountSwitcher:
 
             # Update sequence.json
             data = self._get_sequence_data()
+            source_owner = data["accounts"].get(account_num, {}).get('oauthRefreshOwnerVersion')
             data["accounts"][account_num] = {
                 "email": current_email,
                 "uuid": account_uuid,
@@ -3768,6 +3769,8 @@ class ClaudeAccountSwitcher:
                 "organizationName": organization_name,
                 "added": get_timestamp(),
             }
+            if source_owner is not None:
+                data["accounts"][account_num]['oauthRefreshOwnerVersion'] = source_owner
             carried_alias = alias if alias is not None else existing_alias
             if carried_alias:
                 data["accounts"][account_num]["alias"] = carried_alias
@@ -3983,6 +3986,8 @@ class ClaudeAccountSwitcher:
                 "organizationName": "",
                 "added": get_timestamp(),
             }
+            if previous.get('oauthRefreshOwnerVersion') is not None:
+                record['oauthRefreshOwnerVersion'] = previous['oauthRefreshOwnerVersion']
             if token.startswith("sk-ant-oat01-"):
                 record["credentialType"] = "setup_token"
             if is_api_key:
@@ -4132,7 +4137,8 @@ class ClaudeAccountSwitcher:
         return accounts_info
 
     def _fetch_active_usage(
-        self, account_num: str, email: str, creds: str, org_uuid: str = ""
+        self, account_num: str, email: str, creds: str, org_uuid: str = "",
+        *, refresh_before_ms: float = 0,
     ) -> FetchRecord:
         """Usage fetch for the active/default account, refreshing an expired
         token under Claude Code's own lock protocol.
@@ -4197,7 +4203,9 @@ class ClaudeAccountSwitcher:
         # so this path could take it, read the same lineage and POST it too —
         # one wins, the loser gets invalid_grant and strikes a live account.
         force_refresh: FetchRecord | None = None
-        if not oauth.is_oauth_token_expired(oauth_data.get("expiresAt")):
+        if not oauth.is_oauth_token_expired(oauth_data.get("expiresAt")) and (
+            not refresh_before_ms or oauth_data.get("expiresAt", 0) > time.time() * 1000 + refresh_before_ms
+        ):
             outcome = oauth.try_fetch_usage_for_account(
                 account_num, email, creds, is_active=True,
             )
@@ -4520,6 +4528,7 @@ class ClaudeAccountSwitcher:
                         refresh_input == backup
                         and backup_usable
                         and not force_refresh
+                        and not refresh_before_ms
                         and input_oauth
                         and not oauth.is_oauth_token_expired(
                             input_oauth.get("expiresAt")
@@ -6728,6 +6737,11 @@ class ClaudeAccountSwitcher:
             account_num, email
         )
         if creds:
+            data = oauth.extract_oauth_data(creds) or {}
+            if 'saycodeRefreshOwnerVersion' in data and (
+                type(data['saycodeRefreshOwnerVersion']) is not int or data['saycodeRefreshOwnerVersion'] != 1 or oauth.is_oauth_token_expired(data.get('expiresAt'))
+            ):
+                raise SwitchError('CLAUDE_OWNER_REFRESH_REQUIRED: check the source PC')
             return creds
         if unreadable:
             # The backup may exist but the Keychain cannot be read right now

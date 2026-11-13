@@ -363,6 +363,7 @@ def import_accounts(
     switcher: ClaudeAccountSwitcher,
     source: str,
     force: bool = False,
+    *, owner_target: bool = False,
 ) -> None:
     """Import accounts from a JSON file or stdin.
 
@@ -393,10 +394,10 @@ def import_accounts(
     # Import CAS is serialized with cooperating roster writers. Legacy external
     # writers are not all owned, so automatic rotation stays unavailable.
     with FileLock(switcher.lock_file):
-        _import_envelope(switcher, envelope, force)
+        _import_envelope(switcher, envelope, force, owner_target=owner_target)
 
 
-def _import_envelope(switcher, envelope, force):
+def _import_envelope(switcher, envelope, force, *, owner_target=False):
     if not isinstance(envelope, dict):
         raise TransferError("export file must be a JSON object")
 
@@ -473,6 +474,30 @@ def _import_envelope(switcher, envelope, force):
                 if incoming_generation < current_generation or (incoming_generation == current_generation and not same_token):
                     raise TransferError('managed generation conflict')
         local_slot = switcher._find_account_slot(local_data, email, org_uuid)
+        owner_data = creds_obj.get('claudeAiOauth') if isinstance(creds_obj, dict) else None
+        if isinstance(owner_data, dict) and 'saycodeRefreshOwnerVersion' in owner_data:
+            expiry = owner_data.get('expiresAt')
+            if 'disabled' in raw and type(raw['disabled']) is not bool:
+                raise TransferError('CLAUDE_OWNER_PAYLOAD_INVALID')
+            if (type(owner_data['saycodeRefreshOwnerVersion']) is not int or owner_data['saycodeRefreshOwnerVersion'] != 1
+                    or owner_data.get('refreshToken') or type(expiry) not in (int, float)
+                    or not math.isfinite(expiry) or expiry <= 0 or not owner_data.get('accessToken')):
+                raise TransferError('CLAUDE_OWNER_PAYLOAD_INVALID')
+            if local_slot is not None:
+                if local_data['accounts'][local_slot].get('oauthRefreshOwnerVersion') is not None:
+                    raise TransferError('CLAUDE_OWNER_SOURCE_PROTECTED')
+                local_creds = switcher._read_account_credentials(local_slot, email)
+                from claude_swap.oauth import extract_oauth_data
+                previous = extract_oauth_data(local_creds) if local_creds else None
+                if not previous or type(previous.get('expiresAt')) not in (int, float):
+                    raise TransferError('CLAUDE_OWNER_LOCAL_CREDENTIAL_UNKNOWN')
+                if expiry < previous['expiresAt']:
+                    raise TransferError('CLAUDE_OWNER_GENERATION_STALE')
+                if expiry == previous['expiresAt']:
+                    if owner_data['accessToken'] != previous.get('accessToken'):
+                        raise TransferError('CLAUDE_OWNER_GENERATION_CONFLICT')
+                    if previous.get('refreshToken') and not owner_target:
+                        raise TransferError('CLAUDE_OWNER_SOURCE_PROTECTED')
         if local_slot is not None:
             current_managed_id = local_data['accounts'][local_slot].get('managedAccountId')
             if current_managed_id != managed_id and (current_managed_id or managed_id):
@@ -511,6 +536,8 @@ def _import_envelope(switcher, envelope, force):
                 "kind": "api_key" if is_api_key else "oauth",
                 "alias": alias,
                 "metadata": metadata,
+                "owner": isinstance(owner_data, dict) and owner_data.get("saycodeRefreshOwnerVersion") == 1,
+                "owner_disabled": raw.get("disabled") is True,
                 "creds_text": creds_text,
                 "config_text": json.dumps(config_obj, indent=2),
             }
@@ -650,10 +677,17 @@ def _import_envelope(switcher, envelope, force):
                 "organizationName": entry["org_name"],
                 "added": entry["added"],
             }
+            if previous.get('oauthRefreshOwnerVersion') is not None:
+                new_record['oauthRefreshOwnerVersion'] = previous['oauthRefreshOwnerVersion']
             if entry["kind"] == "api_key":
                 new_record["kind"] = "api_key"
             if entry.get("alias"):
                 new_record["alias"] = entry["alias"]
+            if entry['owner']:
+                if 'disabled' in previous:
+                    new_record['disabled'] = previous['disabled']
+                elif entry['owner_disabled']:
+                    new_record['disabled'] = True
             new_record.update(entry["metadata"])
             data["accounts"][target_num] = new_record
             if int(target_num) not in data["sequence"]:
